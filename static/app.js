@@ -338,6 +338,17 @@ els.form.addEventListener("submit", async (e) => {
 
 els.btnPaste.addEventListener("click", async () => {
   try {
+    const res = await fetch("/api/clipboard", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (data.ok && data.text) {
+      els.urlInput.value = data.text.trim();
+      showToast("URL aus Zwischenablage eingefügt.");
+      return;
+    }
     const text = await navigator.clipboard.readText();
     if (text) {
       els.urlInput.value = text.trim();

@@ -857,24 +857,54 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
             return
 
         if route == "/api/pick-folder":
-            # Öffnet den nativen macOS Finder-Ordnerdialog via AppleScript
+            # Öffnet den nativen macOS Ordnerdialog (direkt im ViDow-Fenster oder via Finder/AppleScript)
             try:
-                script = (
-                    'POSIX path of (choose folder with prompt '
-                    '"ViDow: Bitte wähle den Zielordner für deine Videos:")'
-                )
-                proc = subprocess.run(
-                    ["osascript", "-e", script],
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-                if proc.returncode == 0 and proc.stdout.strip():
-                    chosen = proc.stdout.strip().rstrip("/")
+                chosen = ""
+                if ACTIVE_WINDOW is not None:
+                    try:
+                        import webview
+
+                        folder_Enum = getattr(webview, "FileDialog", None)
+                        dialog_type = folder_Enum.FOLDER if folder_Enum else webview.FOLDER_DIALOG
+                        res = ACTIVE_WINDOW.create_file_dialog(
+                            dialog_type,
+                            directory=load_settings().get("output_dir", str(Path.home() / "Downloads")),
+                        )
+                        if res and len(res) > 0:
+                            chosen = str(res[0]).rstrip("/")
+                        else:
+                            self._send_json({"ok": False, "cancelled": True})
+                            return
+                    except Exception:
+                        chosen = ""
+
+                if not chosen:
+                    script = (
+                        'POSIX path of (choose folder with prompt '
+                        '"ViDow: Bitte wähle den Zielordner für deine Videos:")'
+                    )
+                    proc = subprocess.run(
+                        ["osascript", "-e", script],
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )
+                    if proc.returncode == 0 and proc.stdout.strip():
+                        chosen = proc.stdout.strip().rstrip("/")
+
+                if chosen:
                     settings = save_settings({"output_dir": chosen})
                     self._send_json({"ok": True, "path": chosen, "settings": settings})
                 else:
                     self._send_json({"ok": False, "cancelled": True})
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if route == "/api/clipboard":
+            try:
+                proc = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=3)
+                self._send_json({"ok": True, "text": proc.stdout.strip()})
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
@@ -986,13 +1016,29 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": False, "error": "Unbekannter Endpunkt"}, HTTPStatus.NOT_FOUND)
 
 
+ACTIVE_WINDOW: Any = None
+
+
+def start_http_server() -> tuple[ThreadingHTTPServer | None, int]:
+    """Startet den lokalen ViDow-HTTP-Server auf Port 8765 (oder einem freien Ausweichport)."""
+    for candidate_port in (DEFAULT_PORT, 8766, 8767, 0):
+        try:
+            srv = ThreadingHTTPServer(("127.0.0.1", candidate_port), ViDowRequestHandler)
+            actual_port = srv.server_address[1]
+            return srv, actual_port
+        except OSError:
+            continue
+    return None, DEFAULT_PORT
+
+
 def main() -> None:
+    global ACTIVE_WINDOW
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     settings = load_settings()
     Path(settings["output_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
 
-    server = ThreadingHTTPServer(("127.0.0.1", DEFAULT_PORT), ViDowRequestHandler)
-    url = f"http://127.0.0.1:{DEFAULT_PORT}"
+    server, port = start_http_server()
+    url = f"http://127.0.0.1:{port}"
     print("=" * 60)
     print(f"🎬 ViDow läuft auf: {url}")
     print(f"📂 Standard-Speicherort: {settings['output_dir']}")
@@ -1000,14 +1046,40 @@ def main() -> None:
     print(f"🎞️  ffmpeg: {FFMPEG_PATH or 'Nicht gefunden (bitte brew install ffmpeg)'}")
     print("=" * 60)
 
-    if os.environ.get("VIDOW_NO_BROWSER") != "1":
-        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    use_browser_only = "--browser" in sys.argv or os.environ.get("VIDOW_BROWSER_ONLY") == "1"
 
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n[ViDow] Server wird beendet…")
-        server.server_close()
+    if not use_browser_only:
+        try:
+            import webview
+
+            if server is not None:
+                srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
+                srv_thread.start()
+
+            ACTIVE_WINDOW = webview.create_window(
+                "ViDow — Video Downloader",
+                url,
+                width=1260,
+                height=860,
+                min_size=(920, 640),
+            )
+            webview.start()
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+            return
+        except Exception as exc:
+            print(f"[ViDow] Hinweis: Konnte natives Fenster nicht starten ({exc}), öffne im Browser…")
+
+    if os.environ.get("VIDOW_NO_BROWSER") != "1":
+        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+
+    if server is not None:
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\n[ViDow] Server wird beendet…")
+            server.server_close()
 
 
 if __name__ == "__main__":

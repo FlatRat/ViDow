@@ -1,5 +1,5 @@
 #!/bin/bash
-# ViDow — Doppelklick-Starter für macOS
+# ViDow — Starter für macOS (Natives Desktop-Fenster)
 set -e
 
 cd "$(dirname "$0")"
@@ -13,10 +13,10 @@ fi
 
 source .venv/bin/activate
 
-if ! python3 -c "import yt_dlp, curl_cffi" >/dev/null 2>&1; then
-  echo "⬇️  Installiere yt-dlp & Browser-Impersonation (curl-cffi)..."
-  pip install --upgrade pip yt-dlp curl-cffi
+if ! python3 -c "import yt_dlp, curl_cffi, webview" >/dev/null 2>&1; then
+  echo "⬇️  Installiere yt-dlp, curl-cffi & pywebview..."
+  pip install --upgrade pip yt-dlp curl-cffi pywebview
 fi
 
-echo "🎬 Starte ViDow..."
-exec python3 app.py
+echo "🎬 Starte ViDow im eigenen macOS-Fenster..."
+exec python3 app.py "$@"

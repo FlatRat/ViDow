@@ -5,6 +5,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Lokales macOS App-Bundle (wird über build_mac_app.py generiert)
+ViDow.app/
+
 # Lokale Einstellungen & temporäre Dateien
 settings.json
 *.part
