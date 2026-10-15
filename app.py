@@ -1031,6 +1031,22 @@ def start_http_server() -> tuple[ThreadingHTTPServer | None, int]:
     return None, DEFAULT_PORT
 
 
+def apply_macos_dock_icon() -> None:
+    """Setzt das ViDow-Icon zur Laufzeit im macOS-Dock und im Cmd+Tab-Switcher."""
+    icon_file = STATIC_DIR / "icon.png"
+    if not icon_file.is_file():
+        return
+    try:
+        import AppKit
+
+        app = AppKit.NSApplication.sharedApplication()
+        img = AppKit.NSImage.alloc().initWithContentsOfFile_(str(icon_file))
+        if img:
+            app.setApplicationIconImage_(img)
+    except Exception:
+        pass
+
+
 def main() -> None:
     global ACTIVE_WINDOW
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -1056,6 +1072,7 @@ def main() -> None:
                 srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
                 srv_thread.start()
 
+            apply_macos_dock_icon()
             ACTIVE_WINDOW = webview.create_window(
                 "ViDow — Video Downloader",
                 url,
@@ -1063,7 +1080,7 @@ def main() -> None:
                 height=860,
                 min_size=(920, 640),
             )
-            webview.start()
+            webview.start(func=apply_macos_dock_icon)
             if server is not None:
                 server.shutdown()
                 server.server_close()

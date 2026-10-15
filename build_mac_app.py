@@ -1,121 +1,183 @@
 #!/usr/bin/env python3
 """
-Erzeugt das native macOS App-Bundle 'ViDow.app' im Projektordner.
-Damit lässt sich ViDow wie ein normales Mac-Programm (im Dock oder Finder)
-komplett ohne Terminal-Fenster und ohne Webbrowser starten.
+Erzeugt das native macOS App-Bundle 'ViDow.app' inklusive hochauflösendem
+Vektor-Icon (exakt passend zum ViDow-Logo aus dem Dashboard) und setzt das Icon
+direkt für Finder (ViDow.app & ViDow.command), Dock und Browser-Extension.
 """
 
 from __future__ import annotations
 
-import os
 import plistlib
 import shutil
 import stat
-import struct
 import subprocess
 import tempfile
-import zlib
 from pathlib import Path
+
+import AppKit
+import Foundation
 
 BASE_DIR = Path(__file__).resolve().parent
 APP_BUNDLE = BASE_DIR / "ViDow.app"
+STATIC_DIR = BASE_DIR / "static"
+EXT_ICONS_DIR = BASE_DIR / "extension" / "icons"
 
 
-def make_icon_png(path: Path, size: int = 512) -> None:
-    """Erzeugt ein modernes blaues App-Icon (Abgerundetes Quadrat + Play/Download-Symbol) als PNG."""
-    rows: list[bytes] = []
-    radius = size * 0.22
-    pad = size * 0.06
+def render_vidow_icon_nsimage(size: int = 1024) -> AppKit.NSImage:
+    """
+    Zeichnet das ViDow-Logo (blauer macOS-Squircle mit weißem Play-Dreieck und
+    Download-Pfeil rechts unten – exakt wie das SVG im Header) als Vektorgrafik.
+    """
+    img = AppKit.NSImage.alloc().initWithSize_(Foundation.NSMakeSize(size, size))
+    img.lockFocus()
 
-    for y in range(size):
-        row = bytearray([0])  # PNG Filter-Byte 0
-        for x in range(size):
-            # Prüfe ob innerhalb des abgerundeten Quadrats
-            in_box = False
-            if pad <= x < size - pad and pad <= y < size - pad:
-                in_box = True
-                # Ecken abrunden
-                cx = pad + radius if x < pad + radius else (size - pad - radius if x > size - pad - radius else x)
-                cy = pad + radius if y < pad + radius else (size - pad - radius if y > size - pad - radius else y)
-                if (x - cx) ** 2 + (y - cy) ** 2 > radius ** 2:
-                    in_box = False
+    ctx = AppKit.NSGraphicsContext.currentContext()
+    ctx.setShouldAntialias_(True)
+    ctx.setImageInterpolation_(AppKit.NSImageInterpolationHigh)
 
-            if not in_box:
-                row.extend((0, 0, 0, 0))
-                continue
+    pad = size * 0.08
+    box_size = size - 2 * pad
+    radius = box_size * 0.225
+    rect = Foundation.NSMakeRect(pad, pad, box_size, box_size)
 
-            # Farbverlauf Blau (#2563EB -> #1D4ED8)
-            t = y / size
-            r = int(37 * (1 - t) + 25 * t)
-            g = int(99 * (1 - t) + 65 * t)
-            b = int(235 * (1 - t) + 205 * t)
+    # Hintergrund-Squircle mit Farbverlauf (#3B82F6 oben -> #1D4ED8 unten)
+    bg_path = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+        rect, radius, radius
+    )
+    top_color = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(
+        0.22, 0.48, 0.96, 1.0
+    )
+    bottom_color = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(
+        0.11, 0.28, 0.82, 1.0
+    )
+    gradient = AppKit.NSGradient.alloc().initWithStartingColor_endingColor_(
+        bottom_color, top_color
+    )
+    gradient.drawInBezierPath_angle_(bg_path, 90.0)
 
-            # Weißes Play-Dreieck in der Mitte
-            nx = (x - size * 0.5) / (size * 0.5)
-            ny = (y - size * 0.5) / (size * 0.5)
+    # Dezenter heller Innenrahmen
+    AppKit.NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.18).setStroke()
+    bg_path.setLineWidth_(size * 0.012)
+    bg_path.stroke()
 
-            is_symbol = False
-            # Play-Dreieck links-mittig
-            if -0.28 <= nx <= 0.22 and abs(ny) <= (0.22 - nx) * 0.68:
-                is_symbol = True
-            # Kleiner Download-Pfeil rechts unten
-            if 0.14 <= nx <= 0.26 and 0.02 <= ny <= 0.30:
-                is_symbol = True
-            if 0.04 <= nx <= 0.36 and 0.22 <= ny <= 0.38 and (ny - 0.22) >= abs(nx - 0.20) - 0.02 and (ny - 0.22) <= 0.16:
-                is_symbol = True
+    # Koordinaten-Helfer: rechnet die 24x24 SVG-ViewBox (y von oben nach unten)
+    # in das macOS-Koordinatensystem (y von unten nach oben) innerhalb des Icons um.
+    inner_pad = size * 0.23
+    inner_span = size - 2 * inner_pad
 
-            if is_symbol:
-                row.extend((255, 255, 255, 255))
-            else:
-                row.extend((r, g, b, 255))
-        rows.append(bytes(row))
-
-    raw = b"".join(rows)
-
-    def chunk(tag: bytes, data: bytes) -> bytes:
-        return (
-            struct.pack("!I", len(data))
-            + tag
-            + data
-            + struct.pack("!I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+    def pt(svg_x: float, svg_y: float) -> Foundation.NSPoint:
+        nx = (svg_x - 3.0) / 19.0
+        ny = 1.0 - ((svg_y - 3.0) / 18.0)
+        return Foundation.NSMakePoint(
+            inner_pad + nx * inner_span,
+            inner_pad + ny * inner_span,
         )
 
-    ihdr = struct.pack("!IIBBBBB", size, size, 8, 6, 0, 0, 0)
-    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b"")
-    path.write_bytes(png)
+    AppKit.NSColor.whiteColor().setStroke()
+    stroke_w = size * 0.058
+
+    # 1. Play-Dreieck: polygon points="5 3, 19 12, 5 21"
+    play_path = AppKit.NSBezierPath.bezierPath()
+    play_path.setLineWidth_(stroke_w)
+    play_path.setLineCapStyle_(AppKit.NSLineCapStyleRound)
+    play_path.setLineJoinStyle_(AppKit.NSLineJoinStyleRound)
+    play_path.moveToPoint_(pt(5, 3))
+    play_path.lineToPoint_(pt(18.5, 11.5))
+    play_path.lineToPoint_(pt(5, 20))
+    play_path.closePath()
+    play_path.stroke()
+
+    # Kleiner blauer Freiraum rechts unten für den Download-Pfeil, damit er sich klar abhebt
+    badge_center = pt(19, 18)
+    badge_r = size * 0.145
+    badge_rect = Foundation.NSMakeRect(
+        badge_center.x - badge_r,
+        badge_center.y - badge_r,
+        badge_r * 2,
+        badge_r * 2,
+    )
+    badge_bg = AppKit.NSBezierPath.bezierPathWithOvalInRect_(badge_rect)
+    bottom_color.setFill()
+    badge_bg.fill()
+
+    # 2. Download-Pfeil: line (19,14)->(19,21) + polyline (15.5,17.8)->(19,21.2)->(22.5,17.8)
+    AppKit.NSColor.whiteColor().setStroke()
+    arrow_path = AppKit.NSBezierPath.bezierPath()
+    arrow_path.setLineWidth_(stroke_w * 0.92)
+    arrow_path.setLineCapStyle_(AppKit.NSLineCapStyleRound)
+    arrow_path.setLineJoinStyle_(AppKit.NSLineJoinStyleRound)
+    arrow_path.moveToPoint_(pt(19, 13.8))
+    arrow_path.lineToPoint_(pt(19, 21.0))
+    arrow_path.moveToPoint_(pt(15.6, 17.8))
+    arrow_path.lineToPoint_(pt(19, 21.2))
+    arrow_path.lineToPoint_(pt(22.4, 17.8))
+    arrow_path.stroke()
+
+    img.unlockFocus()
+    return img
 
 
-def create_icns(resources_dir: Path) -> None:
+def save_nsimage_as_png(img: AppKit.NSImage, out_path: Path, pixel_size: int) -> None:
+    rep = AppKit.NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+        None,
+        pixel_size,
+        pixel_size,
+        8,
+        4,
+        True,
+        False,
+        AppKit.NSCalibratedRGBColorSpace,
+        0,
+        0,
+    )
+    rep.setSize_(Foundation.NSMakeSize(pixel_size, pixel_size))
+
+    AppKit.NSGraphicsContext.saveGraphicsState()
+    ctx = AppKit.NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep)
+    AppKit.NSGraphicsContext.setCurrentContext_(ctx)
+    ctx.setShouldAntialias_(True)
+    ctx.setImageInterpolation_(AppKit.NSImageInterpolationHigh)
+    img.drawInRect_fromRect_operation_fraction_(
+        Foundation.NSMakeRect(0, 0, pixel_size, pixel_size),
+        Foundation.NSZeroRect,
+        AppKit.NSCompositingOperationSourceOver,
+        1.0,
+    )
+    AppKit.NSGraphicsContext.restoreGraphicsState()
+
+    png_data = rep.representationUsingType_properties_(
+        AppKit.NSBitmapImageFileTypePNG, {}
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    png_data.writeToFile_atomically_(str(out_path), True)
+
+
+def create_icns_and_assets(resources_dir: Path) -> AppKit.NSImage:
+    ns_img = render_vidow_icon_nsimage(1024)
+
+    # Speichere hochauflösendes PNG auch unter static/icon.png (für das Laufzeit-Dock-Icon)
+    save_nsimage_as_png(ns_img, STATIC_DIR / "icon.png", 512)
+
+    # Speichere echte PNG-Größen für die Browser-Erweiterung
+    EXT_ICONS_DIR.mkdir(parents=True, exist_ok=True)
+    for ext_sz in (16, 48, 128):
+        save_nsimage_as_png(ns_img, EXT_ICONS_DIR / f"icon-{ext_sz}.png", ext_sz)
+
     with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-        master_png = tmp_path / "master.png"
-        make_icon_png(master_png, 512)
-
-        iconset = tmp_path / "AppIcon.iconset"
+        iconset = Path(tmp) / "AppIcon.iconset"
         iconset.mkdir()
 
-        sizes = [16, 32, 128, 256, 512]
-        for s in sizes:
-            subprocess.run(
-                ["sips", "-z", str(s), str(s), str(master_png), "--out", str(iconset / f"icon_{s}x{s}.png")],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-            subprocess.run(
-                ["sips", "-z", str(s * 2), str(s * 2), str(master_png), "--out", str(iconset / f"icon_{s}x{s}@2x.png")],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
+        for s in (16, 32, 128, 256, 512):
+            save_nsimage_as_png(ns_img, iconset / f"icon_{s}x{s}.png", s)
+            save_nsimage_as_png(ns_img, iconset / f"icon_{s}x{s}@2x.png", s * 2)
 
         icns_out = resources_dir / "AppIcon.icns"
         subprocess.run(
             ["iconutil", "-c", "icns", str(iconset), "-o", str(icns_out)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
+            check=True,
         )
+
+    return ns_img
 
 
 def build_app() -> None:
@@ -137,7 +199,7 @@ def build_app() -> None:
         "CFBundleShortVersionString": "1.1.0",
         "CFBundlePackageType": "APPL",
         "CFBundleExecutable": "ViDow",
-        "CFBundleIconFile": "AppIcon",
+        "CFBundleIconFile": "AppIcon.icns",
         "LSMinimumSystemVersion": "11.0",
         "NSHighResolutionCapable": True,
     }
@@ -152,10 +214,22 @@ exec "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/app.py" >> /tmp/vidow.log 2>&
 """
     executable_path = macos_dir / "ViDow"
     executable_path.write_text(launcher_script, encoding="utf-8")
-    executable_path.chmod(executable_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    executable_path.chmod(
+        executable_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    )
 
-    create_icns(resources_dir)
-    print(f"✅ macOS App-Bundle erstellt: {APP_BUNDLE}")
+    ns_img = create_icns_and_assets(resources_dir)
+
+    # Setze das Icon direkt im macOS Finder (NSWorkspace) für ViDow.app & ViDow.command,
+    # damit der Finder das Icon sofort ohne Cache-Verzögerung anzeigt!
+    ws = AppKit.NSWorkspace.sharedWorkspace()
+    ws.setIcon_forFile_options_(ns_img, str(APP_BUNDLE), 0)
+    cmd_file = BASE_DIR / "ViDow.command"
+    if cmd_file.exists():
+        ws.setIcon_forFile_options_(ns_img, str(cmd_file), 0)
+
+    subprocess.run(["touch", str(APP_BUNDLE)], check=False)
+    print(f"✅ ViDow.app & Icons erfolgreich erstellt: {APP_BUNDLE}")
 
 
 if __name__ == "__main__":
