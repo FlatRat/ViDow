@@ -1,0 +1,14 @@
+# Python & Virtual Environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Lokale Einstellungen & temporäre Dateien
+settings.json
+*.part
+*.ytdl
+
+# macOS
+.DS_Store

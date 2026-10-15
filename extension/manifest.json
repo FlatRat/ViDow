@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "ViDow Browser-Helper (Stream-Sniffer & Ad-Skipper)",
+  "version": "1.0.0",
+  "description": "Erkennt echte Video-Streams (.m3u8/.mpd/.mp4), filtert Pre-Roll-Werbung heraus und sendet Videos mit 1 Klick an dein lokales ViDow.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "scripting",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "An ViDow senden",
+    "default_popup": "popup.html"
+  }
+}

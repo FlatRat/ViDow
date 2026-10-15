@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- MANDATORY: Declare support for both light and dark themes -->
+  <meta name="color-scheme" content="light dark">
+  <title>ViDow — Video Downloader &amp; Stream-Filter</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module">
+    if (!("popover" in HTMLElement.prototype)) {
+      import("https://unpkg.com/@oddbird/popover-polyfill@latest/dist/popover.min.js").catch(() => {});
+    }
+  </script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-logo" aria-hidden="true">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            <line x1="19" y1="15" x2="19" y2="21"></line>
+            <polyline points="16 18 19 21 22 18"></polyline>
+          </svg>
+        </div>
+        <div>
+          <h1>ViDow</h1>
+          <p class="subtitle">Lokaler Video-Downloader mit Qualitäts-, Codec- &amp; Werbefilter</p>
+        </div>
+      </div>
+      <div class="status-pills">
+        <span id="status-ytdlp" class="pill pill-ok">yt-dlp bereit</span>
+        <span id="status-ffmpeg" class="pill pill-ok">ffmpeg bereit</span>
+      </div>
+    </header>
+
+    <main class="main-grid">
+      <!-- Linke Spalte: Eingabe & Einstellungen -->
+      <section class="card composer-card" aria-labelledby="composer-heading">
+        <h2 id="composer-heading" class="section-title">1. Video-URL &amp; Analyse</h2>
+
+        <form id="download-form" novalidate>
+          <div class="url-row">
+            <input
+              type="url"
+              id="video-url"
+              name="url"
+              placeholder="https://… (Video-URL oder direkte .m3u8/.mpd Stream-Adresse einfügen)"
+              autocomplete="off"
+              required
+            >
+            <button type="button" id="btn-paste" class="btn btn-secondary" title="Aus Zwischenablage einfügen">
+              Einfügen
+            </button>
+            <button type="button" id="btn-analyze" class="btn btn-secondary">
+              <progress aria-label="Analysiere Video" id="analyze-spinner" class="loading-spinner" hidden></progress>
+              <span id="analyze-btn-text">Prüfen &amp; Vorschau</span>
+            </button>
+          </div>
+
+          <!-- Analyse-Vorschau (erscheint nach Klick auf Prüfen & Vorschau) -->
+          <div id="analysis-panel" class="analysis-panel" hidden>
+            <div class="analysis-main">
+              <img id="analysis-thumb" class="analysis-thumb" src="" alt="Vorschaubild" hidden>
+              <div class="analysis-meta">
+                <div class="analysis-badges">
+                  <span id="analysis-extractor" class="badge">Webseite</span>
+                  <span id="analysis-duration" class="badge">00:00</span>
+                  <span id="analysis-ad-badge" class="badge badge-success" hidden>Werbe-Clips herausgefiltert</span>
+                </div>
+                <h3 id="analysis-title" class="analysis-title">Videotitel</h3>
+                <p id="analysis-avail" class="analysis-avail"></p>
+              </div>
+            </div>
+
+            <!-- Falls mehrere Videos/Streams auf der Seite gefunden wurden (z.B. Pre-Roll + Hauptfilm) -->
+            <div id="entries-container" class="entries-container" hidden>
+              <p class="entries-heading">Gefundene Streams auf dieser Seite (Werbe-Clips sind automatisch abgewählt):</p>
+              <div id="entries-list" class="entries-list"></div>
+            </div>
+          </div>
+
+          <hr class="divider">
+
+          <h2 class="section-title">2. Qualität, Codec &amp; Format</h2>
+          <div class="options-grid">
+            <div class="field">
+              <label for="quality-select">Qualität / Auflösung</label>
+              <select id="quality-select" name="quality">
+                <option value="best">Beste verfügbare Qualität (Auto)</option>
+                <option value="2160">4K Ultra HD (max. 2160p)</option>
+                <option value="1440">2K QHD (max. 1440p)</option>
+                <option value="1080">Full HD (max. 1080p)</option>
+                <option value="720">HD (max. 720p)</option>
+                <option value="480">SD (max. 480p)</option>
+                <option value="360">Kompakt (max. 360p)</option>
+                <option value="audio">Nur Audio extrahieren (Musik / Podcast)</option>
+              </select>
+            </div>
+
+            <div class="field" id="codec-field">
+              <label for="codec-select">Video-Codec</label>
+              <select id="codec-select" name="codec">
+                <option value="auto">Automatisch (Original-Stream ohne Qualitätsverlust)</option>
+                <option value="h264">H.264 / AVC (Beste Kompatibilität für Mac, QuickTime, iPhone)</option>
+                <option value="h265">H.265 / HEVC (Effizient &amp; platzsparend)</option>
+                <option value="vp9">VP9 (Typisch für YouTube 2K/4K)</option>
+                <option value="av1">AV1 (Modernster Web-Codec)</option>
+              </select>
+            </div>
+
+            <div class="field" id="container-field">
+              <label for="container-select">Container-Format</label>
+              <select id="container-select" name="container">
+                <option value="mp4">MP4 (Standard, überall abspielbar)</option>
+                <option value="mkv">MKV (Matroska, ideal für alle Codecs)</option>
+                <option value="webm">WebM</option>
+                <option value="mov">MOV (Apple QuickTime)</option>
+              </select>
+            </div>
+
+            <div class="field" id="audio-format-field" hidden>
+              <label for="audio-format-select">Audio-Codec / Format</label>
+              <select id="audio-format-select" name="audio_format">
+                <option value="mp3">MP3 (320 kbit/s – Universell)</option>
+                <option value="m4a">M4A / AAC (Apple / iTunes optimal)</option>
+                <option value="flac">FLAC (Verlustfrei / Lossless)</option>
+                <option value="wav">WAV (Unkomprimiert)</option>
+                <option value="opus">Opus (Beste Effizienz)</option>
+              </select>
+            </div>
+          </div>
+
+          <label class="checkbox-row" id="recode-row">
+            <input type="checkbox" id="recode-checkbox">
+            <span>Falls gewählter Codec (z. B. H.264) nicht nativ auf der Webseite vorliegt, automatisch mit <code>ffmpeg</code> umcodieren</span>
+          </label>
+
+          <hr class="divider">
+
+          <h2 class="section-title">3. Speicherort</h2>
+          <div class="folder-row">
+            <input
+              type="text"
+              id="output-dir"
+              name="output_dir"
+              placeholder="~/Downloads/ViDow"
+              required
+            >
+            <button type="button" id="btn-pick-folder" class="btn btn-secondary" title="Nativen macOS Ordnerdialog öffnen">
+              📂 Ordner wählen…
+            </button>
+            <button type="button" id="btn-open-folder" class="btn btn-ghost" title="Aktuellen Ordner im Finder öffnen">
+              Im Finder zeigen
+            </button>
+          </div>
+          <div id="recent-dirs" class="recent-dirs" aria-label="Zuletzt verwendete Ordner"></div>
+
+          <hr class="divider">
+
+          <h2 class="section-title">4. Werbefilter &amp; Login-Schutz</h2>
+          <div class="ad-protection-box">
+            <label class="checkbox-row">
+              <input type="checkbox" id="skip-preroll-checkbox" checked>
+              <span>
+                <strong>Pre-Roll-Werbung &amp; Ad-Streams automatisch blockieren</strong>
+                <small class="help-text">Greift den Hauptstream direkt ab und überspringt vorgeschaltete Werbe-Clips (Ad-Server &amp; kurze Spots).</small>
+              </span>
+            </label>
+
+            <div class="inline-suboption" id="min-duration-row">
+              <label for="min-duration-input">Clips kürzer als</label>
+              <input type="number" id="min-duration-input" min="0" max="600" step="5" value="45" class="small-number">
+              <span>Sekunden bei Multi-Stream-Seiten als Werbung ignorieren (<code>0</code> = deaktiviert)</span>
+            </div>
+
+            <label class="checkbox-row">
+              <input type="checkbox" id="sponsorblock-checkbox">
+              <span>
+                <strong>SponsorBlock: Eingesprochene Werbung im Video herausschneiden</strong>
+                <small class="help-text">Entfernt bekannte Sponsoren-Segmente, Eigenwerbung und Intros automatisch per <code>ffmpeg</code>.</small>
+              </span>
+            </label>
+
+            <div class="cookies-row">
+              <label for="cookies-browser-select">Browser-Session / Cookies nutzen (für Login-Seiten &amp; Altersfreigabe):</label>
+              <select id="cookies-browser-select">
+                <option value="none">Keine Cookies (Standard)</option>
+                <option value="chrome">Google Chrome</option>
+                <option value="safari">Apple Safari</option>
+                <option value="firefox">Mozilla Firefox</option>
+                <option value="brave">Brave Browser</option>
+                <option value="edge">Microsoft Edge</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="submit-row">
+            <input
+              type="text"
+              id="custom-title"
+              placeholder="Optional: Eigener Dateiname (leer lassen für Originaltitel)"
+            >
+            <button type="submit" id="btn-download" class="btn btn-primary btn-large">
+              ⬇ Video jetzt herunterladen
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Rechte Spalte: Download-Warteschlange & Info zur Werbe-Umgehung -->
+      <aside class="side-column">
+        <section class="card jobs-card" aria-labelledby="jobs-heading">
+          <div class="card-header-row">
+            <h2 id="jobs-heading" class="section-title">Downloads &amp; Fortschritt</h2>
+            <button type="button" id="btn-clear-jobs" class="btn btn-ghost btn-sm">Fertige leeren</button>
+          </div>
+          <div id="jobs-list" class="jobs-list">
+            <p class="empty-state">Noch keine Downloads gestartet. Füge links eine URL ein!</p>
+          </div>
+        </section>
+
+        <section class="card info-card">
+          <h2 class="section-title">💡 Wie ViDow mit Werbung umgeht</h2>
+          <ul class="info-list">
+            <li>
+              <strong>1. Vorab-Werbung im Player (Pre-Roll):</strong>
+              Webseiten spielen Werbung vor dem Video meist über separate Ad-Server (VAST/IMA) ab. ViDow filmt nicht den Player ab, sondern lädt direkt die eigentliche Videodatei – die Werbung davor fällt dadurch komplett weg.
+            </li>
+            <li>
+              <strong>2. Seiten mit mehreren Clips (Ad + Film):</strong>
+              Liefert eine Seite erst einen 20-Sekunden-Werbespot und danach das Hauptvideo aus, filtert unser <em>Mindestdauer- &amp; Ad-Domain-Filter</em> den Werbe-Clip automatisch heraus.
+            </li>
+            <li>
+              <strong>3. Exotische Player (ViDow Browser-Erweiterung):</strong>
+              Falls eine Seite das Hauptvideo erst lädt, <em>nachdem</em> der Werbespot im Browser lief, nutze die mitgelieferte <strong>ViDow Browser-Erweiterung</strong> (im Ordner <code>extension/</code>). Sie kann Pre-Roll-Werbung im Tab vorspulen und fängt den echten Stream (<code>.m3u8</code>/<code>.mp4</code>) direkt ab.
+            </li>
+          </ul>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <!-- Toast-Container mit Popover API (manual) -->
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
