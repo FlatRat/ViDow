@@ -5,13 +5,17 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Lokales macOS App-Bundle (wird über build_mac_app.py generiert)
+# macOS & Windows App Builds
 ViDow.app/
+dist/
+build/
+*.spec
 
 # Lokale Einstellungen & temporäre Dateien
 settings.json
 *.part
 *.ytdl
 
-# macOS
+# OS-spezifisch
 .DS_Store
+Thumbs.db

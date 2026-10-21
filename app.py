@@ -26,6 +26,19 @@ from typing import Any
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
+# Auf Windows UTF-8 für Konsole erzwingen, um UnicodeEncodeErrors bei Emojis zu verhindern
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 SETTINGS_FILE = BASE_DIR / "settings.json"
@@ -43,14 +56,60 @@ AD_PATTERNS = re.compile(
 
 
 def find_ffmpeg() -> str | None:
-    """Sucht ffmpeg auch in typischen macOS Homebrew-Pfaden."""
-    for candidate in [
-        shutil.which("ffmpeg"),
-        "/opt/homebrew/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
+    """Sucht ffmpeg im PATH sowie in typischen Windows-, macOS- und Linux-Pfaden."""
+    # 1. Direkte Suche im PATH
+    which_ffmpeg = shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
+    if which_ffmpeg and os.path.isfile(which_ffmpeg):
+        return which_ffmpeg
+
+    # 2. Projekt-lokaler Ordner (z. B. bin/ffmpeg.exe)
+    for cand in [
+        BASE_DIR / "bin" / "ffmpeg.exe",
+        BASE_DIR / "ffmpeg.exe",
+        BASE_DIR / "bin" / "ffmpeg",
+        BASE_DIR / "ffmpeg",
     ]:
-        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
+        if cand.is_file():
+            return str(cand)
+
+    # 3. Typische Windows-Installationspfade (WinGet, Scoop, Chocolatey, Standard-Pfade)
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        program_data = os.environ.get("ProgramData", "C:\\ProgramData")
+        program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
+        home = Path.home()
+
+        if local_app_data:
+            winget_dir = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
+            if winget_dir.is_dir():
+                try:
+                    for found in winget_dir.glob("**/ffmpeg.exe"):
+                        if found.is_file():
+                            return str(found)
+                except Exception:
+                    pass
+
+        for c in [
+            home / "scoop" / "shims" / "ffmpeg.exe",
+            home / "scoop" / "apps" / "ffmpeg" / "current" / "bin" / "ffmpeg.exe",
+            Path(program_data) / "chocolatey" / "bin" / "ffmpeg.exe",
+            Path(program_files) / "ffmpeg" / "bin" / "ffmpeg.exe",
+            Path("C:/ffmpeg/bin/ffmpeg.exe"),
+        ]:
+            if c.is_file():
+                return str(c)
+
+    # 4. Typische macOS Homebrew-Pfade
+    if sys.platform == "darwin":
+        for cand_str in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]:
+            if os.path.isfile(cand_str) and os.access(cand_str, os.X_OK):
+                return cand_str
+
+    # 5. Linux-Pfade
+    for cand_str in ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"]:
+        if os.path.isfile(cand_str) and os.access(cand_str, os.X_OK):
+            return cand_str
+
     return None
 
 
@@ -59,12 +118,13 @@ FFMPEG_PATH = find_ffmpeg()
 
 def load_settings() -> dict[str, Any]:
     default_dir = str(Path.home() / "Downloads" / "ViDow")
+    video_dir_name = "Videos" if sys.platform == "win32" else "Movies"
     defaults: dict[str, Any] = {
         "output_dir": default_dir,
         "recent_dirs": [
             default_dir,
             str(Path.home() / "Downloads"),
-            str(Path.home() / "Movies"),
+            str(Path.home() / video_dir_name),
         ],
         "quality": "best",
         "codec": "auto",
@@ -214,18 +274,34 @@ def apply_impersonate_and_cookies(
     if cookies_browser and cookies_browser != "none":
         home = Path.home()
         valid_cookie_store = True
-        if cookies_browser == "firefox":
-            ff_dir = home / "Library/Application Support/Firefox/Profiles"
-            valid_cookie_store = ff_dir.exists() and any(ff_dir.glob("*/cookies.sqlite"))
-        elif cookies_browser == "chrome":
-            ch_dir = home / "Library/Application Support/Google/Chrome"
-            valid_cookie_store = ch_dir.exists() and any(ch_dir.glob("*/Cookies"))
-        elif cookies_browser == "brave":
-            br_dir = home / "Library/Application Support/BraveSoftware/Brave-Browser"
-            valid_cookie_store = br_dir.exists() and any(br_dir.glob("*/Cookies"))
-        elif cookies_browser == "edge":
-            ed_dir = home / "Library/Application Support/Microsoft Edge"
-            valid_cookie_store = ed_dir.exists() and any(ed_dir.glob("*/Cookies"))
+        if sys.platform == "darwin":
+            if cookies_browser == "firefox":
+                ff_dir = home / "Library/Application Support/Firefox/Profiles"
+                valid_cookie_store = ff_dir.exists() and any(ff_dir.glob("*/cookies.sqlite"))
+            elif cookies_browser == "chrome":
+                ch_dir = home / "Library/Application Support/Google/Chrome"
+                valid_cookie_store = ch_dir.exists() and any(ch_dir.glob("*/Cookies"))
+            elif cookies_browser == "brave":
+                br_dir = home / "Library/Application Support/BraveSoftware/Brave-Browser"
+                valid_cookie_store = br_dir.exists() and any(br_dir.glob("*/Cookies"))
+            elif cookies_browser == "edge":
+                ed_dir = home / "Library/Application Support/Microsoft Edge"
+                valid_cookie_store = ed_dir.exists() and any(ed_dir.glob("*/Cookies"))
+        elif sys.platform == "win32":
+            local_app_data = Path(os.environ.get("LOCALAPPDATA", str(home / "AppData/Local")))
+            app_data = Path(os.environ.get("APPDATA", str(home / "AppData/Roaming")))
+            if cookies_browser == "firefox":
+                ff_dir = app_data / "Mozilla/Firefox/Profiles"
+                valid_cookie_store = ff_dir.exists() and any(ff_dir.glob("*/cookies.sqlite"))
+            elif cookies_browser == "chrome":
+                ch_dir = local_app_data / "Google/Chrome/User Data"
+                valid_cookie_store = ch_dir.exists()
+            elif cookies_browser == "brave":
+                br_dir = local_app_data / "BraveSoftware/Brave-Browser/User Data"
+                valid_cookie_store = br_dir.exists()
+            elif cookies_browser == "edge":
+                ed_dir = local_app_data / "Microsoft/Edge/User Data"
+                valid_cookie_store = ed_dir.exists()
 
         if valid_cookie_store:
             ydl_opts["cookiesfrombrowser"] = (cookies_browser,)
@@ -750,6 +826,186 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
         )
 
 
+ACTIVE_WINDOW: Any = None
+
+
+def pick_folder_dialog(initial_dir: str = "") -> str | None:
+    """Öffnet einen nativen Ordnerauswahl-Dialog (pywebview -> OS-spezifischer Fallback)."""
+    # 1. Wenn pywebview-Fenster aktiv ist
+    if ACTIVE_WINDOW is not None:
+        try:
+            import webview
+
+            folder_enum = getattr(webview, "FileDialog", None)
+            dialog_type = folder_enum.FOLDER if folder_enum else webview.FOLDER_DIALOG
+            res = ACTIVE_WINDOW.create_file_dialog(
+                dialog_type,
+                directory=initial_dir or str(Path.home() / "Downloads"),
+            )
+            if res and len(res) > 0:
+                return str(res[0]).rstrip("/\\")
+            return None
+        except Exception:
+            pass
+
+    # 2. Windows Fallback (Tkinter oder PowerShell)
+    if sys.platform == "win32":
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            chosen = filedialog.askdirectory(
+                initialdir=initial_dir or str(Path.home() / "Downloads"),
+                title="ViDow: Zielordner für Downloads auswählen",
+            )
+            root.destroy()
+            if chosen:
+                return str(chosen).rstrip("/\\")
+        except Exception:
+            pass
+
+        try:
+            ps_script = (
+                "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; "
+                "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                f"$f.SelectedPath = '{initial_dir}'; "
+                "$f.Description = 'ViDow: Zielordner auswählen'; "
+                "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }"
+            )
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_script],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip().splitlines()[-1].strip().rstrip("/\\")
+        except Exception:
+            pass
+
+    # 3. macOS Fallback (osascript / Finder)
+    elif sys.platform == "darwin":
+        try:
+            script = (
+                'POSIX path of (choose folder with prompt '
+                '"ViDow: Bitte wähle den Zielordner für deine Videos:")'
+            )
+            proc = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip().rstrip("/")
+        except Exception:
+            pass
+
+    # 4. Linux Fallback (zenity / kdialog)
+    else:
+        for cmd in [
+            ["zenity", "--file-selection", "--directory", "--title=ViDow: Zielordner"],
+            ["kdialog", "--getexistingdirectory"],
+        ]:
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    return proc.stdout.strip().rstrip("/")
+            except Exception:
+                continue
+
+    return None
+
+
+def get_system_clipboard() -> str:
+    """Liest Text aus der System-Zwischenablage (Windows, macOS, Linux)."""
+    if sys.platform == "win32":
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "Get-Clipboard"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if proc.returncode == 0:
+                return proc.stdout.strip()
+        except Exception:
+            pass
+
+        try:
+            import tkinter as tk
+
+            root = tk.Tk()
+            root.withdraw()
+            text = root.clipboard_get()
+            root.destroy()
+            return str(text).strip()
+        except Exception:
+            pass
+        return ""
+
+    if sys.platform == "darwin":
+        try:
+            proc = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=3)
+            if proc.returncode == 0:
+                return proc.stdout.strip()
+        except Exception:
+            pass
+        return ""
+
+    for tool in [["xclip", "-selection", "clipboard", "-o"], ["xsel", "--clipboard", "--output"]]:
+        try:
+            proc = subprocess.run(tool, capture_output=True, text=True, timeout=3)
+            if proc.returncode == 0:
+                return proc.stdout.strip()
+        except Exception:
+            continue
+
+    return ""
+
+
+def reveal_in_file_manager(target_path: Path) -> None:
+    """Öffnet den Pfad im nativen Dateimanager (Windows Explorer, macOS Finder, Linux)."""
+    target_path = target_path.expanduser().resolve()
+    if sys.platform == "win32":
+        target_str = os.path.normpath(str(target_path))
+        if target_path.is_file():
+            # Öffnet Windows Explorer und markiert die Datei
+            subprocess.Popen(["explorer.exe", f"/select,{target_str}"])
+        else:
+            target_path.mkdir(parents=True, exist_ok=True)
+            os.startfile(target_str)
+    elif sys.platform == "darwin":
+        if target_path.is_file():
+            subprocess.Popen(["open", "-R", str(target_path)])
+        else:
+            target_path.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen(["open", str(target_path)])
+    else:
+        # Linux
+        if target_path.is_file():
+            subprocess.Popen(["xdg-open", str(target_path.parent)])
+        else:
+            target_path.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen(["xdg-open", str(target_path)])
+
+
+def setup_windows_app_id() -> None:
+    """Setzt unter Windows die AppUserModelID für sauberes Taskleisten-Icon & Gruppierung."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "FlatRat.ViDow.VideoDownloader.1.0"
+            )
+        except Exception:
+            pass
+
+
 class ViDowRequestHandler(BaseHTTPRequestHandler):
     server_version = "ViDow/1.0"
 
@@ -793,6 +1049,15 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "app": "ViDow",
+                    "platform": sys.platform,
+                    "os_label": (
+                        "Windows"
+                        if sys.platform == "win32"
+                        else "macOS"
+                        if sys.platform == "darwin"
+                        else "Linux"
+                    ),
+                    "file_manager_label": "Explorer" if sys.platform == "win32" else "Finder",
                     "yt_dlp_version": yt_dlp.version.__version__,
                     "ffmpeg_available": bool(FFMPEG_PATH),
                     "ffmpeg_path": FFMPEG_PATH,
@@ -831,6 +1096,7 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
             ".js": "application/javascript; charset=utf-8",
             ".svg": "image/svg+xml",
             ".png": "image/png",
+            ".ico": "image/x-icon",
             ".json": "application/json; charset=utf-8",
         }
         content_type = mime_map.get(file_path.suffix.lower(), "application/octet-stream")
@@ -857,41 +1123,9 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
             return
 
         if route == "/api/pick-folder":
-            # Öffnet den nativen macOS Ordnerdialog (direkt im ViDow-Fenster oder via Finder/AppleScript)
             try:
-                chosen = ""
-                if ACTIVE_WINDOW is not None:
-                    try:
-                        import webview
-
-                        folder_Enum = getattr(webview, "FileDialog", None)
-                        dialog_type = folder_Enum.FOLDER if folder_Enum else webview.FOLDER_DIALOG
-                        res = ACTIVE_WINDOW.create_file_dialog(
-                            dialog_type,
-                            directory=load_settings().get("output_dir", str(Path.home() / "Downloads")),
-                        )
-                        if res and len(res) > 0:
-                            chosen = str(res[0]).rstrip("/")
-                        else:
-                            self._send_json({"ok": False, "cancelled": True})
-                            return
-                    except Exception:
-                        chosen = ""
-
-                if not chosen:
-                    script = (
-                        'POSIX path of (choose folder with prompt '
-                        '"ViDow: Bitte wähle den Zielordner für deine Videos:")'
-                    )
-                    proc = subprocess.run(
-                        ["osascript", "-e", script],
-                        capture_output=True,
-                        text=True,
-                        timeout=120,
-                    )
-                    if proc.returncode == 0 and proc.stdout.strip():
-                        chosen = proc.stdout.strip().rstrip("/")
-
+                current_dir = load_settings().get("output_dir", str(Path.home() / "Downloads"))
+                chosen = pick_folder_dialog(current_dir)
                 if chosen:
                     settings = save_settings({"output_dir": chosen})
                     self._send_json({"ok": True, "path": chosen, "settings": settings})
@@ -903,8 +1137,8 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
 
         if route == "/api/clipboard":
             try:
-                proc = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=3)
-                self._send_json({"ok": True, "text": proc.stdout.strip()})
+                clip_text = get_system_clipboard()
+                self._send_json({"ok": True, "text": clip_text})
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
@@ -913,13 +1147,9 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
             target = str(payload.get("path") or "").strip()
             if not target:
                 target = load_settings().get("output_dir", "")
-            target_path = Path(target).expanduser()
+            target_path = Path(target)
             try:
-                if target_path.is_file():
-                    subprocess.Popen(["open", "-R", str(target_path)])
-                else:
-                    target_path.mkdir(parents=True, exist_ok=True)
-                    subprocess.Popen(["open", str(target_path)])
+                reveal_in_file_manager(target_path)
                 self._send_json({"ok": True})
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -1016,9 +1246,6 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": False, "error": "Unbekannter Endpunkt"}, HTTPStatus.NOT_FOUND)
 
 
-ACTIVE_WINDOW: Any = None
-
-
 def start_http_server() -> tuple[ThreadingHTTPServer | None, int]:
     """Startet den lokalen ViDow-HTTP-Server auf Port 8765 (oder einem freien Ausweichport)."""
     for candidate_port in (DEFAULT_PORT, 8766, 8767, 0):
@@ -1033,6 +1260,8 @@ def start_http_server() -> tuple[ThreadingHTTPServer | None, int]:
 
 def apply_macos_dock_icon() -> None:
     """Setzt das ViDow-Icon zur Laufzeit im macOS-Dock und im Cmd+Tab-Switcher."""
+    if sys.platform != "darwin":
+        return
     icon_file = STATIC_DIR / "icon.png"
     if not icon_file.is_file():
         return
@@ -1050,16 +1279,25 @@ def apply_macos_dock_icon() -> None:
 def main() -> None:
     global ACTIVE_WINDOW
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    setup_windows_app_id()
     settings = load_settings()
     Path(settings["output_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
 
     server, port = start_http_server()
     url = f"http://127.0.0.1:{port}"
+
+    ffmpeg_status = FFMPEG_PATH
+    if not ffmpeg_status:
+        if sys.platform == "win32":
+            ffmpeg_status = "Nicht gefunden (Tipp: 'winget install Gyan.FFmpeg' im Terminal ausführen)"
+        else:
+            ffmpeg_status = "Nicht gefunden (bitte 'brew install ffmpeg' ausführen)"
+
     print("=" * 60)
     print(f"🎬 ViDow läuft auf: {url}")
     print(f"📂 Standard-Speicherort: {settings['output_dir']}")
     print(f"🔧 yt-dlp Version: {yt_dlp.version.__version__}")
-    print(f"🎞️  ffmpeg: {FFMPEG_PATH or 'Nicht gefunden (bitte brew install ffmpeg)'}")
+    print(f"🎞️  ffmpeg: {ffmpeg_status}")
     print("=" * 60)
 
     use_browser_only = "--browser" in sys.argv or os.environ.get("VIDOW_BROWSER_ONLY") == "1"
@@ -1072,7 +1310,15 @@ def main() -> None:
                 srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
                 srv_thread.start()
 
-            apply_macos_dock_icon()
+            if sys.platform == "darwin":
+                apply_macos_dock_icon()
+
+            icon_ico = STATIC_DIR / "icon.ico"
+            icon_png = STATIC_DIR / "icon.png"
+            chosen_icon = str(icon_ico if (sys.platform == "win32" and icon_ico.is_file()) else icon_png)
+            if not os.path.isfile(chosen_icon):
+                chosen_icon = None
+
             ACTIVE_WINDOW = webview.create_window(
                 "ViDow — Video Downloader",
                 url,
@@ -1080,13 +1326,20 @@ def main() -> None:
                 height=860,
                 min_size=(920, 640),
             )
-            webview.start(func=apply_macos_dock_icon)
+
+            start_kwargs: dict[str, Any] = {}
+            if sys.platform == "darwin":
+                start_kwargs["func"] = apply_macos_dock_icon
+            if chosen_icon:
+                start_kwargs["icon"] = chosen_icon
+
+            webview.start(**start_kwargs)
             if server is not None:
                 server.shutdown()
                 server.server_close()
             return
         except Exception as exc:
-            print(f"[ViDow] Hinweis: Konnte natives Fenster nicht starten ({exc}), öffne im Browser…")
+            print(f"[ViDow] Hinweis: Konnte natives Desktop-Fenster nicht starten ({exc}), öffne im Browser…")
 
     if os.environ.get("VIDOW_NO_BROWSER") != "1":
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()

@@ -120,11 +120,18 @@ async function initStatus() {
 
     els.statusYtdlp.textContent = `yt-dlp ${data.yt_dlp_version}`;
     if (data.ffmpeg_available) {
-      els.statusFfmpeg.textContent = "ffmpeg aktiv";
+      els.statusFfmpeg.textContent = "ffmpeg bereit";
       els.statusFfmpeg.className = "pill pill-ok";
     } else {
-      els.statusFfmpeg.textContent = "ffmpeg fehlt (brew install ffmpeg)";
+      const tip = data.platform === "win32" ? "winget install Gyan.FFmpeg" : "brew install ffmpeg";
+      els.statusFfmpeg.textContent = `ffmpeg fehlt (${tip})`;
       els.statusFfmpeg.className = "pill pill-warn";
+    }
+
+    window.vidowFileManagerLabel = data.file_manager_label || (data.platform === "win32" ? "Explorer" : "Finder");
+    if (els.btnOpenFolder) {
+      els.btnOpenFolder.textContent = `Im ${window.vidowFileManagerLabel} zeigen`;
+      els.btnOpenFolder.title = `Aktuellen Ordner im ${window.vidowFileManagerLabel} öffnen`;
     }
 
     const s = data.settings || {};
@@ -493,7 +500,8 @@ function renderJobs(jobs) {
       const revealBtn = document.createElement("button");
       revealBtn.type = "button";
       revealBtn.className = "btn btn-secondary btn-sm";
-      revealBtn.textContent = "📂 Im Finder zeigen";
+      const fm = window.vidowFileManagerLabel || "Ordner";
+      revealBtn.textContent = `📂 Im ${fm} zeigen`;
       revealBtn.addEventListener("click", async () => {
         await fetch("/api/open-folder", {
           method: "POST",
