@@ -114,10 +114,81 @@ def find_ffmpeg() -> str | None:
 
 
 FFMPEG_PATH = find_ffmpeg()
+DEFAULT_OUTPUT_DIR = str(Path.home() / "Downloads" / "ViDow")
+
+
+def get_missing_volume_name(path: Path) -> str | None:
+    """
+    Prüft plattformübergreifend, ob ein Pfad auf ein externes Laufwerk verweist,
+    das aktuell nicht angeschlossen/gemountet ist:
+    - macOS: /Volumes/<Name> (verhindert PermissionError & Geister-Ordner in /Volumes)
+    - Windows: Laufwerksbuchstabe wie D:\\ (wenn das USB-Laufwerk abgesteckt ist)
+    """
+    parts = path.parts
+    if sys.platform == "darwin" and len(parts) >= 3 and parts[0] == "/" and parts[1] == "Volumes":
+        volume_name = parts[2]
+        volume_root = Path("/Volumes") / volume_name
+        try:
+            if not volume_root.exists():
+                return volume_name
+        except OSError:
+            return volume_name
+    elif sys.platform == "win32" and path.drive:
+        drive_root = Path(f"{path.drive}\\")
+        try:
+            if not drive_root.exists():
+                return path.drive
+        except OSError:
+            return path.drive
+    return None
+
+
+def resolve_usable_output_dir(
+    raw_dir: str | None, *, fallback_on_unavailable: bool = True
+) -> tuple[str, str | None]:
+    """
+    Stellt sicher, dass der Zielordner existiert und beschreibbar ist.
+    Falls ein externes Laufwerk (z. B. /Volumes/My Passport oder D:\\) abgesteckt ist:
+    - Mit fallback_on_unavailable=True wird sauber auf ~/Downloads/ViDow ausgewichen
+      (ohne die gespeicherten Favoriten in settings.json zu überschreiben).
+    - Mit fallback_on_unavailable=False wird ein verständlicher ValueError geworfen.
+    """
+    cleaned = (raw_dir or "").strip()
+    target = Path(cleaned).expanduser() if cleaned else Path(DEFAULT_OUTPUT_DIR)
+
+    missing_vol = get_missing_volume_name(target)
+    if missing_vol:
+        msg = (
+            f"Das externe Laufwerk „{missing_vol}“ ({target}) ist aktuell nicht angeschlossen."
+        )
+        if not fallback_on_unavailable:
+            raise ValueError(msg)
+        fallback = Path(DEFAULT_OUTPUT_DIR)
+        try:
+            fallback.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return str(fallback), msg
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        if not os.access(target, os.W_OK):
+            raise PermissionError(f"Keine Schreibrechte für {target}")
+        return str(target), None
+    except OSError as exc:
+        msg = f"Zielordner „{target}“ ist nicht verfügbar ({exc})."
+        if not fallback_on_unavailable:
+            raise ValueError(msg) from exc
+        fallback = Path(DEFAULT_OUTPUT_DIR)
+        try:
+            fallback.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return str(fallback), msg
 
 
 def load_settings() -> dict[str, Any]:
-    default_dir = str(Path.home() / "Downloads" / "ViDow")
+    default_dir = DEFAULT_OUTPUT_DIR
     video_dir_name = "Videos" if sys.platform == "win32" else "Movies"
     defaults: dict[str, Any] = {
         "output_dir": default_dir,
@@ -587,7 +658,7 @@ def analyze_url(payload: dict[str, Any]) -> dict[str, Any]:
 
 def run_download_job(job_id: str, params: dict[str, Any]) -> None:
     url = str(params.get("url") or "").strip()
-    output_dir = str(Path(str(params.get("output_dir") or "~/Downloads/ViDow")).expanduser())
+    raw_output_dir = str(params.get("output_dir") or DEFAULT_OUTPUT_DIR)
     quality = str(params.get("quality") or "best")
     codec = str(params.get("codec") or "auto")
     container = str(params.get("container") or "mp4")
@@ -601,13 +672,26 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
     custom_title = str(params.get("custom_title") or "").strip()
     recode_if_needed = bool(params.get("recode_if_needed", False))
 
-    os.makedirs(output_dir, exist_ok=True)
-
     def update_job(**kwargs: Any) -> None:
         with JOBS_LOCK:
             if job_id in JOBS:
                 JOBS[job_id].update(kwargs)
                 JOBS[job_id]["updated_at"] = time.time()
+
+    try:
+        output_dir, _ = resolve_usable_output_dir(
+            raw_output_dir, fallback_on_unavailable=False
+        )
+    except Exception as exc:
+        err_msg = str(exc)
+        update_job(
+            status="error",
+            status_text=f"Fehler: {err_msg}",
+            error=err_msg,
+            speed_formatted="—",
+            eta_formatted="—",
+        )
+        return
 
     def progress_hook(d: dict[str, Any]) -> None:
         with JOBS_LOCK:
@@ -969,27 +1053,32 @@ def get_system_clipboard() -> str:
 
 def reveal_in_file_manager(target_path: Path) -> None:
     """Öffnet den Pfad im nativen Dateimanager (Windows Explorer, macOS Finder, Linux)."""
-    target_path = target_path.expanduser().resolve()
+    expanded = target_path.expanduser()
+    if not expanded.is_file():
+        resolved_dir, _ = resolve_usable_output_dir(
+            str(expanded), fallback_on_unavailable=False
+        )
+        target_path = Path(resolved_dir).resolve()
+    else:
+        target_path = expanded.resolve()
+
     if sys.platform == "win32":
         target_str = os.path.normpath(str(target_path))
         if target_path.is_file():
             # Öffnet Windows Explorer und markiert die Datei
             subprocess.Popen(["explorer.exe", f"/select,{target_str}"])
         else:
-            target_path.mkdir(parents=True, exist_ok=True)
             os.startfile(target_str)
     elif sys.platform == "darwin":
         if target_path.is_file():
             subprocess.Popen(["open", "-R", str(target_path)])
         else:
-            target_path.mkdir(parents=True, exist_ok=True)
             subprocess.Popen(["open", str(target_path)])
     else:
         # Linux
         if target_path.is_file():
             subprocess.Popen(["xdg-open", str(target_path.parent)])
         else:
-            target_path.mkdir(parents=True, exist_ok=True)
             subprocess.Popen(["xdg-open", str(target_path)])
 
 
@@ -1045,6 +1134,10 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
 
         if route == "/api/status":
             settings = load_settings()
+            effective_dir, dir_warning = resolve_usable_output_dir(
+                settings.get("output_dir"), fallback_on_unavailable=True
+            )
+            effective_settings = {**settings, "output_dir": effective_dir}
             self._send_json(
                 {
                     "ok": True,
@@ -1061,7 +1154,8 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
                     "yt_dlp_version": yt_dlp.version.__version__,
                     "ffmpeg_available": bool(FFMPEG_PATH),
                     "ffmpeg_path": FFMPEG_PATH,
-                    "settings": settings,
+                    "settings": effective_settings,
+                    "output_dir_warning": dir_warning,
                 }
             )
             return
@@ -1124,7 +1218,9 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
 
         if route == "/api/pick-folder":
             try:
-                current_dir = load_settings().get("output_dir", str(Path.home() / "Downloads"))
+                current_dir, _ = resolve_usable_output_dir(
+                    load_settings().get("output_dir"), fallback_on_unavailable=True
+                )
                 chosen = pick_folder_dialog(current_dir)
                 if chosen:
                     settings = save_settings({"output_dir": chosen})
@@ -1146,11 +1242,15 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
         if route == "/api/open-folder":
             target = str(payload.get("path") or "").strip()
             if not target:
-                target = load_settings().get("output_dir", "")
+                target, _ = resolve_usable_output_dir(
+                    load_settings().get("output_dir"), fallback_on_unavailable=True
+                )
             target_path = Path(target)
             try:
                 reveal_in_file_manager(target_path)
                 self._send_json({"ok": True})
+            except ValueError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
@@ -1170,10 +1270,19 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": "URL fehlt."}, HTTPStatus.BAD_REQUEST)
                 return
 
+            requested_dir = str(payload.get("output_dir") or load_settings()["output_dir"]).strip()
+            try:
+                resolved_output_dir, _ = resolve_usable_output_dir(
+                    requested_dir, fallback_on_unavailable=False
+                )
+            except ValueError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+
             # Speichere aktuelle Präferenzen als Standard
             save_settings(
                 {
-                    "output_dir": payload.get("output_dir") or load_settings()["output_dir"],
+                    "output_dir": resolved_output_dir,
                     "quality": payload.get("quality") or "best",
                     "codec": payload.get("codec") or "auto",
                     "container": payload.get("container") or "mp4",
@@ -1198,7 +1307,7 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
                     if payload.get("quality") == "audio"
                     else payload.get("container") or "mp4"
                 ),
-                "output_dir": str(Path(str(payload.get("output_dir") or load_settings()["output_dir"])).expanduser()),
+                "output_dir": resolved_output_dir,
                 "status": "queued",
                 "status_text": "In Warteschlange…",
                 "progress": 0.0,
@@ -1281,7 +1390,9 @@ def main() -> None:
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     setup_windows_app_id()
     settings = load_settings()
-    Path(settings["output_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
+    effective_output_dir, output_dir_warning = resolve_usable_output_dir(
+        settings.get("output_dir"), fallback_on_unavailable=True
+    )
 
     server, port = start_http_server()
     url = f"http://127.0.0.1:{port}"
@@ -1295,7 +1406,9 @@ def main() -> None:
 
     print("=" * 60)
     print(f"🎬 ViDow läuft auf: {url}")
-    print(f"📂 Standard-Speicherort: {settings['output_dir']}")
+    print(f"📂 Standard-Speicherort: {effective_output_dir}")
+    if output_dir_warning:
+        print(f"⚠️  {output_dir_warning}")
     print(f"🔧 yt-dlp Version: {yt_dlp.version.__version__}")
     print(f"🎞️  ffmpeg: {ffmpeg_status}")
     print("=" * 60)
