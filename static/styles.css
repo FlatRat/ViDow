@@ -446,6 +446,11 @@ select:focus {
   flex-shrink: 0;
 }
 
+.analysis-thumb.is-vertical {
+  width: 64px;
+  height: 114px;
+}
+
 .analysis-badges {
   display: flex;
   gap: 0.4rem;
@@ -519,6 +524,12 @@ select:focus {
   opacity: 0.62;
 }
 
+.entry-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 /* Jobs-Liste */
 .card-header-row {
   display: flex;
@@ -586,6 +597,7 @@ select:focus {
 
 .progress-fill {
   height: 100%;
+  width: var(--progress-pct, 0%);
   background: var(--brand);
   border-radius: 999px;
   transition: width 0.25s ease;
@@ -605,6 +617,15 @@ select:focus {
   align-items: center;
   gap: 0.5rem;
   font-size: 0.8rem;
+}
+
+.job-dir {
+  color: var(--muted);
+}
+
+.job-btn-group {
+  display: flex;
+  gap: 0.4rem;
 }
 
 .info-list {
@@ -736,5 +757,13 @@ progress.loading-spinner:indeterminate {
 }
 
 [popover].toast-popover:is(:popover-open, .\:popover-open) {
+  display: flex;
+}
+
+.toast-popover.toast-error {
+  border-color: var(--danger);
+}
+
+.toast-popover.toast-fallback {
   display: flex;
 }

@@ -285,45 +285,73 @@ JOBS_LOCK = threading.Lock()
 JOBS: dict[str, dict[str, Any]] = {}
 
 
+def get_format_short_edge_and_dims(fmt: dict[str, Any]) -> tuple[int, str, bool]:
+    """
+    Ermittelt die orientierungsunabhängige Qualitätsstufe (kurze Kante, z. B. 1080 bei
+    1920x1080 UND bei 1080x1920 Hochformat), den Anzeige-String und ob Hochformat vorliegt.
+    """
+    vc = str(fmt.get("vcodec") or "").lower()
+    ext = str(fmt.get("ext") or "").lower()
+    proto = str(fmt.get("protocol") or "").lower()
+    if vc == "none" or ext == "mhtml" or proto == "mhtml":
+        return 0, "", False
+
+    w = fmt.get("width")
+    h = fmt.get("height")
+    if not (isinstance(w, int) and w > 0 and isinstance(h, int) and h > 0):
+        res_str = str(fmt.get("resolution") or "")
+        m = re.match(r"^(\d+)\s*[x×]\s*(\d+)$", res_str)
+        if m:
+            w, h = int(m.group(1)), int(m.group(2))
+
+    if isinstance(w, int) and w > 0 and isinstance(h, int) and h > 0:
+        return min(w, h), f"{w}×{h}", h > w
+    if isinstance(h, int) and h > 0:
+        return h, f"{h}p", False
+    if isinstance(w, int) and w > 0:
+        return w, f"{w}p", False
+    return 0, "", False
+
+
 def build_format_selector(quality: str, codec: str, container: str, audio_format: str) -> str:
     """
-    Erzeugt den optimalen yt-dlp Format-Selector anhand der gewünschten Auflösung und des Codecs.
-    Fällt sauber auf das nächstbeste Format zurück, falls ein exakter Codec auf der Quellseite
-    nicht nativ vorliegt (ffmpeg übernimmt dann bei Bedarf das Remuxing/Transcoding).
+    Erzeugt den yt-dlp Format-Selector.
+    Die eigentliche Auflösungs- und Codec-Priorisierung erfolgt über `build_format_sort`
+    (`res:<Stufe>`), damit sowohl Querformat- (1920x1080) als auch Hochkantvideos (1080x1920)
+    in allen Qualitätsstufen zuverlässig geladen werden.
     """
     if quality == "audio":
         return "bestaudio/best"
+    if FFMPEG_PATH:
+        return "bestvideo*+bestaudio/best"
+    return "best/bestvideo+bestaudio"
 
-    height_filter = ""
-    if quality in {"2160", "1440", "1080", "720", "480", "360"}:
-        height_filter = f"[height<={quality}]"
 
-    codec_map = {
-        "h264": "^(avc1|h264)",
-        "h265": "^(hev1|hvc1|hevc|h265)",
-        "vp9": "^vp0?9",
-        "av1": "^av01",
-    }
+def build_format_sort(quality: str, codec: str, container: str) -> list[str]:
+    """
+    Erzeugt die yt-dlp `format_sort`-Kriterien (`-S`).
+    `res:<N>` nutzt in yt-dlp `min(width, height)` und funktioniert dadurch identisch
+    für 16:9-Querformat, 9:16-/4:5-Hochformat, 1:1-Videos und Streams ohne Breitenangabe.
+    """
+    if quality == "audio":
+        return []
 
-    if codec in codec_map:
-        vc = codec_map[codec]
-        # 1. Versuche gewünschten Video-Codec + gewünschte Höhe
-        # 2. Fallback auf beliebigen Video-Codec mit gewünschter Höhe (wird ggf. konvertiert)
-        return (
-            f"bestvideo{height_filter}[vcodec~='{vc}']+bestaudio/"
-            f"best{height_filter}[vcodec~='{vc}']/"
-            f"bestvideo{height_filter}+bestaudio/"
-            f"best{height_filter}/best"
-        )
+    sort_spec: list[str] = []
+    q_clean = str(quality or "best").strip().lower().rstrip("p")
+    if q_clean.isdigit() and int(q_clean) > 0:
+        sort_spec.append(f"res:{int(q_clean)}")
+    else:
+        sort_spec.append("res")
 
-    # Codec == "auto"
-    if container == "mp4":
-        return (
-            f"bestvideo{height_filter}[ext=mp4]+bestaudio[ext=m4a]/"
-            f"bestvideo{height_filter}+bestaudio/"
-            f"best{height_filter}/best"
-        )
-    return f"bestvideo{height_filter}+bestaudio/best{height_filter}/best"
+    if codec in {"h264", "h265", "vp9", "av1"}:
+        sort_spec.append(f"vcodec:{codec}")
+
+    if container == "mp4" and codec in {"auto", "h264", "h265"}:
+        sort_spec.append("ext:mp4:m4a")
+    elif container == "webm" and codec in {"auto", "vp9", "av1"}:
+        sort_spec.append("ext:webm:webm")
+
+    return sort_spec
 
 
 def apply_impersonate_and_cookies(
@@ -378,7 +406,9 @@ def apply_impersonate_and_cookies(
             ydl_opts["cookiesfrombrowser"] = (cookies_browser,)
 
 
-def extract_direct_stream_from_html(html: str, page_url: str) -> dict[str, Any] | None:
+def extract_direct_stream_from_html(
+    html: str, page_url: str, video_id: str = "direct-stream"
+) -> dict[str, Any] | None:
     """
     Sucht direkt im HTML-Code einer Seite (oder einer /embed/-Seite) nach
     flashvars / mediaDefinitions oder direkten .m3u8/.mp4-Streams, falls der
@@ -396,28 +426,65 @@ def extract_direct_stream_from_html(html: str, page_url: str) -> dict[str, Any] 
             thumb = fv.get("image_url")
             duration = fv.get("video_duration")
             media_defs = fv.get("mediaDefinitions") or []
-            best_url = ""
-            heights: list[int] = []
+            master_url = ""
+            default_url = ""
+            quality_urls: dict[int, str] = {}
+            heights: set[int] = set()
+
             for md in media_defs:
                 if not isinstance(md, dict):
                     continue
                 vurl = md.get("videoUrl")
                 q = md.get("quality")
-                if isinstance(q, (int, str)) and str(q).isdigit():
-                    heights.append(int(q))
-                if vurl and isinstance(vurl, str) and vurl.startswith("http"):
-                    if md.get("defaultQuality") or not best_url:
-                        best_url = vurl
+                valid_http = (
+                    isinstance(vurl, str)
+                    and vurl.startswith("http")
+                    and "/video/get_media" not in vurl
+                )
+
+                if isinstance(q, list):
+                    for item in q:
+                        if isinstance(item, (int, str)) and str(item).isdigit():
+                            heights.add(int(item))
+                    if valid_http and (
+                        ".m3u8" in vurl.lower()
+                        or ".mpd" in vurl.lower()
+                        or str(md.get("format") or "").lower() == "hls"
+                    ):
+                        master_url = master_url or vurl
+                elif isinstance(q, (int, str)) and str(q).isdigit():
+                    q_int = int(q)
+                    heights.add(q_int)
+                    if valid_http:
+                        quality_urls[q_int] = vurl
+
+                if valid_http and (md.get("defaultQuality") or not default_url):
+                    default_url = vurl
+
+            best_url = master_url or (
+                quality_urls[max(quality_urls)] if quality_urls else default_url
+            )
             if best_url:
+                sorted_heights = sorted(heights, reverse=True)
+                formats_list = [
+                    {
+                        "url": quality_urls.get(h, best_url),
+                        "height": h,
+                        "format_id": f"{h}p",
+                    }
+                    for h in sorted_heights
+                ] or [{"url": best_url}]
                 return {
-                    "id": "direct-stream",
+                    "id": video_id or "direct-stream",
                     "title": clean_title,
                     "url": best_url,
+                    "master_url": master_url,
+                    "quality_urls": quality_urls,
                     "webpage_url": page_url,
                     "thumbnail": thumb,
                     "duration": int(duration) if str(duration).isdigit() else None,
                     "extractor_key": "DirectStreamFallback",
-                    "formats": [{"url": best_url, "height": h} for h in heights] or [{"url": best_url}],
+                    "formats": formats_list,
                 }
         except Exception:
             pass
@@ -430,16 +497,76 @@ def extract_direct_stream_from_html(html: str, page_url: str) -> dict[str, Any] 
     )
     filtered = [u.replace("\\/", "/") for u in stream_matches if not AD_PATTERNS.search(u)]
     if filtered:
-        best_url = filtered[0]
+        best_url = next((u for u in filtered if ".m3u8" in u.lower()), filtered[0])
         return {
-            "id": "direct-html-stream",
+            "id": video_id or "direct-html-stream",
             "title": clean_title,
             "url": best_url,
+            "master_url": best_url if ".m3u8" in best_url.lower() else "",
+            "quality_urls": {},
             "webpage_url": page_url,
             "extractor_key": "HTML5StreamFallback",
             "formats": [{"url": best_url}],
         }
     return None
+
+
+def select_fallback_stream_url(fallback_info: dict[str, Any], ydl_opts: dict[str, Any]) -> str:
+    """
+    Wählt beim Direkt-Stream-Fallback die passende Stream-URL anhand der gewünschten Auflösung:
+    1. Falls eine Multi-Qualitäts-Master-Playlist (.m3u8/.mpd) vorliegt, wird diese bevorzugt,
+       damit yt-dlp über `format_sort` (`res:<Stufe>`) exakt die gewünschte Hoch-/Querformat-Stufe lädt.
+    2. Falls nur einzelne Qualitäts-URLs vorliegen, wird die beste Stufe <= Zielauflösung gewählt.
+    """
+    master_url = str(fallback_info.get("master_url") or "")
+    if master_url:
+        return master_url
+
+    quality_urls: dict[int, str] = fallback_info.get("quality_urls") or {}
+    if quality_urls:
+        target_res: int | None = None
+        for item in ydl_opts.get("format_sort") or []:
+            if isinstance(item, str) and item.startswith("res:"):
+                val = item.split(":", 1)[1].strip()
+                if val.isdigit():
+                    target_res = int(val)
+                    break
+        if target_res is not None:
+            le_candidates = [q for q in quality_urls if q <= target_res]
+            chosen_q = max(le_candidates) if le_candidates else min(quality_urls)
+            return quality_urls[chosen_q]
+        return quality_urls[max(quality_urls)]
+
+    return str(fallback_info.get("url") or "")
+
+
+def download_fallback_stream(
+    fallback_info: dict[str, Any], clean_opts: dict[str, Any]
+) -> dict[str, Any]:
+    """Lädt einen per HTML-Fallback gefundenen Stream unter Beibehaltung des echten Titels/ID."""
+    fb_opts = dict(clean_opts)
+    stream_url = select_fallback_stream_url(fallback_info, fb_opts)
+    raw_outtmpl = fb_opts.get("outtmpl")
+    if isinstance(raw_outtmpl, str) and "%(title)" in raw_outtmpl:
+        safe_title = yt_dlp.utils.sanitize_filename(
+            str(fallback_info.get("title") or "Video"), restricted=False
+        )[:150].strip() or "Video"
+        safe_id = yt_dlp.utils.sanitize_filename(
+            str(fallback_info.get("id") or "stream"), restricted=True
+        )[:40] or "stream"
+        out_dir = os.path.dirname(raw_outtmpl)
+        has_res_token = "%(resolution" in raw_outtmpl
+        suffix = "%(resolution& [{}]|)s.%(ext)s" if has_res_token else ".%(ext)s"
+        fb_opts["outtmpl"] = os.path.join(out_dir, f"{safe_title} [{safe_id}]{suffix}")
+
+    with yt_dlp.YoutubeDL(fb_opts) as ydl_fb:
+        res = ydl_fb.extract_info(stream_url, download=True)
+        if isinstance(res, dict):
+            if fallback_info.get("title"):
+                res["title"] = fallback_info["title"]
+            if fallback_info.get("thumbnail") and not res.get("thumbnail"):
+                res["thumbnail"] = fallback_info["thumbnail"]
+        return res
 
 
 def fetch_url_even_on_error(target_url: str, headers: dict[str, str] | None = None) -> tuple[int, str]:
@@ -522,11 +649,10 @@ def extract_info_with_fallback(
             for candidate_url in dict.fromkeys(candidates):
                 status_code, html = fetch_url_even_on_error(candidate_url, custom_headers)
                 if html:
-                    fallback_info = extract_direct_stream_from_html(html, url)
+                    fallback_info = extract_direct_stream_from_html(html, url, video_id=video_id)
                     if fallback_info:
                         if download:
-                            with yt_dlp.YoutubeDL(clean_opts) as ydl_fb:
-                                return ydl_fb.extract_info(fallback_info["url"], download=True)
+                            return download_fallback_stream(fallback_info, clean_opts)
                         return fallback_info
 
                     if status_code == 410 or re.search(
@@ -536,11 +662,12 @@ def extract_info_with_fallback(
                     ):
                         if "pornhub." not in url.lower():
                             _, main_html = fetch_url_even_on_error(url, custom_headers)
-                            main_fallback = extract_direct_stream_from_html(main_html, url)
+                            main_fallback = extract_direct_stream_from_html(
+                                main_html, url, video_id=video_id
+                            )
                             if main_fallback:
                                 if download:
-                                    with yt_dlp.YoutubeDL(clean_opts) as ydl_fb:
-                                        return ydl_fb.extract_info(main_fallback["url"], download=True)
+                                    return download_fallback_stream(main_fallback, clean_opts)
                                 return main_fallback
 
                         raise ValueError(
@@ -584,19 +711,33 @@ def analyze_url(payload: dict[str, Any]) -> dict[str, Any]:
 
     analyzed_entries: list[dict[str, Any]] = []
     all_heights: set[int] = set()
+    all_tier_dims: dict[int, str] = {}
     all_vcodecs: set[str] = set()
 
     for idx, entry in enumerate(entries_list):
         formats = entry.get("formats") or []
         heights: set[int] = set()
+        tier_dims: dict[int, str] = {}
         vcodecs: set[str] = set()
+        portrait_count = 0
+        landscape_count = 0
         best_filesize = entry.get("filesize") or entry.get("filesize_approx") or 0
 
         for fmt in formats:
-            h = fmt.get("height")
-            if isinstance(h, int) and h >= 144:
-                heights.add(h)
-                all_heights.add(h)
+            tier, dims, is_portrait = get_format_short_edge_and_dims(fmt)
+            if tier >= 144:
+                heights.add(tier)
+                all_heights.add(tier)
+                if dims and ("×" in dims or tier not in tier_dims):
+                    tier_dims[tier] = dims
+                if dims and ("×" in dims or tier not in all_tier_dims):
+                    all_tier_dims[tier] = dims
+                if "×" in dims:
+                    if is_portrait:
+                        portrait_count += 1
+                    else:
+                        landscape_count += 1
+
             vc = str(fmt.get("vcodec") or "")
             if vc and vc != "none":
                 if vc.startswith(("avc1", "h264")):
@@ -615,6 +756,27 @@ def analyze_url(payload: dict[str, Any]) -> dict[str, Any]:
             if fsize and fsize > best_filesize:
                 best_filesize = fsize
 
+        # Fallback auf Top-Level width/height, falls einzelne Extractors diese nur am Entry setzen
+        top_tier, top_dims, top_portrait = get_format_short_edge_and_dims(entry)
+        if top_tier >= 144 and not heights:
+            heights.add(top_tier)
+            all_heights.add(top_tier)
+            if top_dims:
+                tier_dims[top_tier] = top_dims
+                all_tier_dims.setdefault(top_tier, top_dims)
+        if portrait_count == 0 and landscape_count == 0 and "×" in top_dims:
+            if top_portrait:
+                portrait_count = 1
+            else:
+                landscape_count = 1
+
+        entry_is_vertical = portrait_count > landscape_count
+        sorted_entry_heights = sorted(heights, reverse=True)
+        entry_tiers = [
+            {"quality": q, "resolution": tier_dims.get(q, f"{q}p")}
+            for q in sorted_entry_heights
+        ]
+
         suspected_ad, ad_reason = is_suspected_ad_entry(entry, min_duration, len(entries_list))
 
         analyzed_entries.append(
@@ -630,7 +792,9 @@ def analyze_url(payload: dict[str, Any]) -> dict[str, Any]:
                 "duration_formatted": format_seconds(entry.get("duration")),
                 "uploader": entry.get("uploader") or entry.get("channel") or info.get("extractor_key") or "",
                 "extractor": entry.get("extractor_key") or info.get("extractor_key") or "Generic",
-                "available_heights": sorted(heights, reverse=True),
+                "is_vertical": entry_is_vertical,
+                "available_heights": sorted_entry_heights,
+                "available_tiers": entry_tiers,
                 "available_codecs": sorted(vcodecs),
                 "approx_size": format_bytes(best_filesize),
                 "is_suspected_ad": suspected_ad,
@@ -640,6 +804,11 @@ def analyze_url(payload: dict[str, Any]) -> dict[str, Any]:
 
     # Sortiere so, dass echte Hauptvideos zuerst stehen, falls ein kurzer Pre-Roll-Clip erkannt wurde
     primary = next((e for e in analyzed_entries if not e["is_suspected_ad"]), analyzed_entries[0])
+    sorted_all_heights = sorted(all_heights, reverse=True)
+    all_tiers = [
+        {"quality": q, "resolution": all_tier_dims.get(q, f"{q}p")}
+        for q in sorted_all_heights
+    ]
 
     return {
         "title": info.get("title") or primary["title"],
@@ -649,7 +818,9 @@ def analyze_url(payload: dict[str, Any]) -> dict[str, Any]:
         "duration": info.get("duration") or primary["duration"],
         "duration_formatted": format_seconds(info.get("duration") or primary["duration"]),
         "uploader": info.get("uploader") or primary["uploader"],
-        "available_heights": sorted(all_heights, reverse=True),
+        "is_vertical": bool(primary.get("is_vertical")),
+        "available_heights": sorted_all_heights,
+        "available_tiers": all_tiers,
         "available_codecs": sorted(all_vcodecs),
         "entries": analyzed_entries,
         "ad_filtered_count": sum(1 for e in analyzed_entries if e["is_suspected_ad"]),
@@ -762,11 +933,22 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
             update_job(filepath=filepath)
 
     format_selector = build_format_selector(quality, codec, container, audio_format)
+    format_sort = build_format_sort(quality, codec, container)
 
-    outtmpl = os.path.join(
-        output_dir,
-        f"{custom_title}.%(ext)s" if custom_title else "%(title).180B [%(id)s].%(ext)s",
-    )
+    if custom_title:
+        safe_custom = yt_dlp.utils.sanitize_filename(custom_title, restricted=False).strip() or "Video"
+        target_ext = audio_format if quality == "audio" else container
+        existing_same_name = os.path.exists(os.path.join(output_dir, f"{safe_custom}.{target_ext}"))
+        if quality != "audio" and existing_same_name:
+            out_name = f"{safe_custom}%(resolution& [{{}}]|)s.%(ext)s"
+        else:
+            out_name = f"{safe_custom}.%(ext)s"
+    elif quality == "audio":
+        out_name = "%(title).180B [%(id)s].%(ext)s"
+    else:
+        out_name = "%(title).170B [%(id)s]%(resolution& [{}]|)s.%(ext)s"
+
+    outtmpl = os.path.join(output_dir, out_name)
 
     postprocessors: list[dict[str, Any]] = []
     postprocessor_args: dict[str, list[str]] = {}
@@ -819,6 +1001,7 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
     ydl_opts: dict[str, Any] = {
         "format": format_selector,
         "outtmpl": outtmpl,
+        "overwrites": True,
         "progress_hooks": [progress_hook],
         "postprocessor_hooks": [postprocessor_hook],
         "postprocessors": postprocessors,
@@ -826,6 +1009,9 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
         "quiet": True,
         "no_warnings": True,
     }
+
+    if format_sort:
+        ydl_opts["format_sort"] = format_sort
 
     if quality != "audio":
         ydl_opts["merge_output_format"] = container
@@ -838,6 +1024,8 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
 
     apply_impersonate_and_cookies(ydl_opts, cookies_browser, custom_headers)
 
+    skipped_reasons: list[str] = []
+
     # Schutz gegen vorgeschaltete Werbe-Clips bei Multi-Stream-Webseiten
     if skip_preroll_ads:
         def ad_match_filter(info_dict: dict[str, Any], *, incomplete: bool = False) -> str | None:
@@ -845,11 +1033,22 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
                 return None
             entry_url = str(info_dict.get("url") or info_dict.get("webpage_url") or "")
             if AD_PATTERNS.search(entry_url):
-                return "Übersprungen: Werbe-Stream erkannt"
+                reason = "Übersprungen: Werbe-Stream erkannt"
+                skipped_reasons.append(reason)
+                return reason
             dur = info_dict.get("duration")
-            # Nur filtern, wenn die Dauer bekannt ist und unter dem Schwellenwert liegt
-            if min_duration > 0 and dur is not None and dur < min_duration:
-                return f"Übersprungen: Clip ist kürzer als {min_duration}s ({int(dur)}s – vermutlich Pre-Roll-Werbung)"
+            total_entries = int(
+                info_dict.get("n_entries") or info_dict.get("playlist_count") or 1
+            )
+            # Mindestdauer nur bei Multi-Stream-/Playlist-Seiten anwenden, damit kurze
+            # Einzelvideos (YouTube Shorts, Reels, TikToks < 45s) nicht übersprungen werden!
+            if total_entries > 1 and min_duration > 0 and dur is not None and dur < min_duration:
+                reason = (
+                    f"Übersprungen: Clip ist kürzer als {min_duration}s "
+                    f"({int(dur)}s – vermutlich Pre-Roll-Werbung)"
+                )
+                skipped_reasons.append(reason)
+                return reason
             return None
 
         ydl_opts["match_filter"] = ad_match_filter
@@ -860,11 +1059,19 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
             ydl_opts, url, download=True, custom_headers=custom_headers
         )
         final_path = ""
+        actual_res = ""
         if info:
             title = info.get("title") or custom_title or "Video"
             thumb = info.get("thumbnail")
-            if "requested_downloads" in info and info["requested_downloads"]:
-                final_path = info["requested_downloads"][0].get("filepath") or ""
+            req_dl = (info.get("requested_downloads") or [None])[0]
+            if isinstance(req_dl, dict):
+                final_path = req_dl.get("filepath") or ""
+                _, actual_res, _ = get_format_short_edge_and_dims(req_dl)
+            if not actual_res:
+                _, actual_res, _ = get_format_short_edge_and_dims(info)
+            if not final_path:
+                with JOBS_LOCK:
+                    final_path = str(JOBS.get(job_id, {}).get("filepath") or "")
             if not final_path:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl_tmp:
                     final_path = ydl_tmp.prepare_filename(info)
@@ -874,17 +1081,22 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
                     cand = str(Path(final_path).with_suffix(f".{container}"))
                     if os.path.exists(cand):
                         final_path = cand
+            if (not final_path or not os.path.exists(final_path)) and skipped_reasons:
+                raise ValueError(skipped_reasons[0])
             update_job(
                 status="completed",
                 status_text="Abgeschlossen",
                 title=title,
                 thumbnail=thumb,
+                resolution=actual_res,
                 progress=100.0,
                 eta_formatted="Fertig",
                 filepath=final_path,
                 filename=os.path.basename(final_path) if final_path else "",
             )
         else:
+            if skipped_reasons:
+                raise ValueError(skipped_reasons[0])
             update_job(
                 status="completed",
                 status_text="Abgeschlossen",

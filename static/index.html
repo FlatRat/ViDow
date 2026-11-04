@@ -48,6 +48,9 @@
               name="url"
               placeholder="https://… (Video-URL oder direkte .m3u8/.mpd Stream-Adresse einfügen)"
               autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
               required
             >
             <button type="button" id="btn-paste" class="btn btn-secondary" title="Aus Zwischenablage einfügen">
@@ -62,10 +65,11 @@
           <!-- Analyse-Vorschau (erscheint nach Klick auf Prüfen & Vorschau) -->
           <div id="analysis-panel" class="analysis-panel" hidden>
             <div class="analysis-main">
-              <img id="analysis-thumb" class="analysis-thumb" src="" alt="Vorschaubild" hidden>
+              <img id="analysis-thumb" class="analysis-thumb" src="" alt="Vorschaubild" width="136" height="78" hidden>
               <div class="analysis-meta">
                 <div class="analysis-badges">
                   <span id="analysis-extractor" class="badge">Webseite</span>
+                  <span id="analysis-orientation" class="badge" hidden>📱 Hochformat</span>
                   <span id="analysis-duration" class="badge">00:00</span>
                   <span id="analysis-ad-badge" class="badge badge-success" hidden>Werbe-Clips herausgefiltert</span>
                 </div>
@@ -86,15 +90,17 @@
           <h2 class="section-title">2. Qualität, Codec &amp; Format</h2>
           <div class="options-grid">
             <div class="field">
-              <label for="quality-select">Qualität / Auflösung</label>
+              <label for="quality-select">Qualität / Auflösung (Quer- &amp; Hochformat)</label>
               <select id="quality-select" name="quality">
                 <option value="best">Beste verfügbare Qualität (Auto)</option>
                 <option value="2160">4K Ultra HD (max. 2160p)</option>
                 <option value="1440">2K QHD (max. 1440p)</option>
                 <option value="1080">Full HD (max. 1080p)</option>
                 <option value="720">HD (max. 720p)</option>
+                <option value="540">qHD / Social (max. 540p)</option>
                 <option value="480">SD (max. 480p)</option>
                 <option value="360">Kompakt (max. 360p)</option>
+                <option value="240">Datensparmodus (max. 240p)</option>
                 <option value="audio">Nur Audio extrahieren (Musik / Podcast)</option>
               </select>
             </div>
@@ -133,7 +139,7 @@
           </div>
 
           <label class="checkbox-row" id="recode-row">
-            <input type="checkbox" id="recode-checkbox">
+            <input type="checkbox" id="recode-checkbox" name="recode_if_needed">
             <span>Falls gewählter Codec (z. B. H.264) nicht nativ auf der Webseite vorliegt, automatisch mit <code>ffmpeg</code> umcodieren</span>
           </label>
 
@@ -146,6 +152,9 @@
               id="output-dir"
               name="output_dir"
               placeholder="~/Downloads/ViDow"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
               required
             >
             <button type="button" id="btn-pick-folder" class="btn btn-secondary" title="Nativen Ordnerdialog öffnen">
@@ -162,7 +171,7 @@
           <h2 class="section-title">4. Werbefilter &amp; Login-Schutz</h2>
           <div class="ad-protection-box">
             <label class="checkbox-row">
-              <input type="checkbox" id="skip-preroll-checkbox" checked>
+              <input type="checkbox" id="skip-preroll-checkbox" name="skip_preroll_ads" checked>
               <span>
                 <strong>Pre-Roll-Werbung &amp; Ad-Streams automatisch blockieren</strong>
                 <small class="help-text">Greift den Hauptstream direkt ab und überspringt vorgeschaltete Werbe-Clips (Ad-Server &amp; kurze Spots).</small>
@@ -171,12 +180,12 @@
 
             <div class="inline-suboption" id="min-duration-row">
               <label for="min-duration-input">Clips kürzer als</label>
-              <input type="number" id="min-duration-input" min="0" max="600" step="5" value="45" class="small-number">
+              <input type="number" id="min-duration-input" name="min_duration" min="0" max="600" step="5" value="45" class="small-number">
               <span>Sekunden bei Multi-Stream-Seiten als Werbung ignorieren (<code>0</code> = deaktiviert)</span>
             </div>
 
             <label class="checkbox-row">
-              <input type="checkbox" id="sponsorblock-checkbox">
+              <input type="checkbox" id="sponsorblock-checkbox" name="sponsorblock">
               <span>
                 <strong>SponsorBlock: Eingesprochene Werbung im Video herausschneiden</strong>
                 <small class="help-text">Entfernt bekannte Sponsoren-Segmente, Eigenwerbung und Intros automatisch per <code>ffmpeg</code>.</small>
@@ -185,7 +194,7 @@
 
             <div class="cookies-row">
               <label for="cookies-browser-select">Browser-Session / Cookies nutzen (für Login-Seiten &amp; Altersfreigabe):</label>
-              <select id="cookies-browser-select">
+              <select id="cookies-browser-select" name="cookies_browser">
                 <option value="none">Keine Cookies (Standard)</option>
                 <option value="chrome">Google Chrome</option>
                 <option value="safari">Apple Safari</option>
@@ -200,6 +209,7 @@
             <input
               type="text"
               id="custom-title"
+              name="custom_title"
               placeholder="Optional: Eigener Dateiname (leer lassen für Originaltitel)"
             >
             <button type="submit" id="btn-download" class="btn btn-primary btn-large">

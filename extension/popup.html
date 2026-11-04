@@ -206,17 +206,22 @@
   <div class="row">
     <div>
       <label for="ext-quality">Qualität</label>
-      <select id="ext-quality">
+      <select id="ext-quality" name="quality">
         <option value="best">Beste (Auto)</option>
         <option value="2160">4K (2160p)</option>
+        <option value="1440">2K (1440p)</option>
         <option value="1080">Full HD (1080p)</option>
         <option value="720">HD (720p)</option>
+        <option value="540">qHD (540p)</option>
+        <option value="480">SD (480p)</option>
+        <option value="360">Kompakt (360p)</option>
+        <option value="240">Niedrig (240p)</option>
         <option value="audio">Nur Audio (MP3)</option>
       </select>
     </div>
     <div>
       <label for="ext-codec">Codec</label>
-      <select id="ext-codec">
+      <select id="ext-codec" name="codec">
         <option value="auto">Auto</option>
         <option value="h264">H.264 (Mac/MP4)</option>
         <option value="h265">H.265 (HEVC)</option>

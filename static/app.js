@@ -10,6 +10,7 @@ const els = {
   analysisPanel: document.getElementById("analysis-panel"),
   analysisThumb: document.getElementById("analysis-thumb"),
   analysisExtractor: document.getElementById("analysis-extractor"),
+  analysisOrientation: document.getElementById("analysis-orientation"),
   analysisDuration: document.getElementById("analysis-duration"),
   analysisAdBadge: document.getElementById("analysis-ad-badge"),
   analysisTitle: document.getElementById("analysis-title"),
@@ -45,16 +46,95 @@ const els = {
 let currentAnalysis = null;
 let toastCounter = 0;
 
+const DEFAULT_QUALITY_OPTIONS = Array.from(els.qualitySelect.options).map((opt) => ({
+  value: opt.value,
+  label: opt.textContent,
+}));
+
+function resetQualityOptions() {
+  const prevValue = els.qualitySelect.value || "best";
+  els.qualitySelect.innerHTML = "";
+  for (const item of DEFAULT_QUALITY_OPTIONS) {
+    const opt = document.createElement("option");
+    opt.value = item.value;
+    opt.textContent = item.label;
+    els.qualitySelect.appendChild(opt);
+  }
+  if (Array.from(els.qualitySelect.options).some((o) => o.value === prevValue)) {
+    els.qualitySelect.value = prevValue;
+  } else {
+    els.qualitySelect.value = "best";
+  }
+}
+
+function syncQualityOptionsWithAnalysis(info) {
+  const tiers = Array.isArray(info?.available_tiers) ? info.available_tiers : [];
+  if (!tiers.length) {
+    resetQualityOptions();
+    return;
+  }
+
+  const prevValue = els.qualitySelect.value || "best";
+  const tierMap = new Map();
+  for (const t of tiers) {
+    if (t && typeof t.quality === "number") {
+      tierMap.set(String(t.quality), t.resolution || `${t.quality}p`);
+    }
+  }
+
+  const numericMap = new Map();
+  for (const item of DEFAULT_QUALITY_OPTIONS) {
+    if (/^\d+$/.test(item.value)) {
+      const resLabel = tierMap.get(item.value);
+      numericMap.set(
+        Number(item.value),
+        resLabel ? `✓ ${item.label} — ${resLabel}` : item.label
+      );
+    }
+  }
+  for (const [qStr, resLabel] of tierMap.entries()) {
+    const qNum = Number(qStr);
+    if (!numericMap.has(qNum)) {
+      numericMap.set(qNum, `✓ Video-Stufe ${resLabel} (max. ${qNum}p)`);
+    }
+  }
+
+  const sortedNumeric = Array.from(numericMap.entries()).sort((a, b) => b[0] - a[0]);
+  els.qualitySelect.innerHTML = "";
+
+  const bestOpt = document.createElement("option");
+  bestOpt.value = "best";
+  const topRes = tiers[0]?.resolution ? ` — ${tiers[0].resolution}` : "";
+  bestOpt.textContent = `Beste verfügbare Qualität (Auto${topRes})`;
+  els.qualitySelect.appendChild(bestOpt);
+
+  for (const [qNum, label] of sortedNumeric) {
+    const opt = document.createElement("option");
+    opt.value = String(qNum);
+    opt.textContent = label;
+    els.qualitySelect.appendChild(opt);
+  }
+
+  const audioDef = DEFAULT_QUALITY_OPTIONS.find((o) => o.value === "audio");
+  const audioOpt = document.createElement("option");
+  audioOpt.value = "audio";
+  audioOpt.textContent = audioDef ? audioDef.label : "Nur Audio extrahieren";
+  els.qualitySelect.appendChild(audioOpt);
+
+  if (Array.from(els.qualitySelect.options).some((o) => o.value === prevValue)) {
+    els.qualitySelect.value = prevValue;
+  } else {
+    els.qualitySelect.value = "best";
+  }
+}
+
 function showToast(message, isError = false) {
   toastCounter += 1;
   const toastId = `vidow-toast-${toastCounter}`;
   const toast = document.createElement("div");
   toast.id = toastId;
   toast.setAttribute("popover", "manual");
-  toast.className = "toast-popover";
-  if (isError) {
-    toast.style.borderColor = "var(--danger)";
-  }
+  toast.className = isError ? "toast-popover toast-error" : "toast-popover";
 
   const msgSpan = document.createElement("span");
   msgSpan.textContent = message;
@@ -78,7 +158,7 @@ function showToast(message, isError = false) {
   try {
     toast.showPopover();
   } catch {
-    toast.style.display = "flex";
+    toast.classList.add("toast-fallback");
   }
 
   setTimeout(() => {
@@ -154,6 +234,9 @@ async function initStatus() {
     }
     renderRecentDirs(s.recent_dirs || []);
     updateQualityModeUI();
+    if (data.output_dir_warning) {
+      showToast(data.output_dir_warning, false);
+    }
 
     // Unterstützt direkten Aufruf per Query-Parameter (?url=...) von der Browser-Erweiterung
     const params = new URLSearchParams(window.location.search);
@@ -204,8 +287,18 @@ async function handleAnalyze() {
     els.analysisExtractor.textContent = info.extractor || "Stream";
     els.analysisDuration.textContent = `Dauer: ${info.duration_formatted || "—"}`;
 
+    if (els.analysisOrientation) {
+      els.analysisOrientation.hidden = false;
+      els.analysisOrientation.textContent = info.is_vertical
+        ? "📱 Hochformat"
+        : "🖥️ Querformat";
+    }
+
     if (info.thumbnail) {
       els.analysisThumb.src = info.thumbnail;
+      els.analysisThumb.classList.toggle("is-vertical", Boolean(info.is_vertical));
+      els.analysisThumb.width = info.is_vertical ? 64 : 136;
+      els.analysisThumb.height = info.is_vertical ? 114 : 78;
       els.analysisThumb.hidden = false;
     } else {
       els.analysisThumb.hidden = true;
@@ -218,13 +311,23 @@ async function handleAnalyze() {
       els.analysisAdBadge.hidden = true;
     }
 
-    const heightsText = (info.available_heights || []).length
-      ? `Verfügbare Auflösungen: ${info.available_heights.map((h) => `${h}p`).join(", ")}`
+    const tiers = Array.isArray(info.available_tiers) ? info.available_tiers : [];
+    const heightsText = tiers.length
+      ? `Verfügbare Qualitätsstufen: ${tiers
+          .map((t) =>
+            t.resolution && t.resolution !== `${t.quality}p`
+              ? `${t.quality}p (${t.resolution})`
+              : `${t.quality}p`
+          )
+          .join(", ")}`
+      : (info.available_heights || []).length
+      ? `Verfügbare Qualitätsstufen: ${info.available_heights.map((h) => `${h}p`).join(", ")}`
       : "Stream-Auflösung wird automatisch gewählt";
     const codecsText = (info.available_codecs || []).length
       ? ` • Nativ vorhandene Codecs: ${info.available_codecs.map((c) => c.toUpperCase()).join(", ")}`
       : "";
     els.analysisAvail.textContent = `${heightsText}${codecsText}`;
+    syncQualityOptionsWithAnalysis(info);
 
     // Falls mehrere Einträge auf der Seite gefunden wurden
     const entries = info.entries || [];
@@ -236,9 +339,7 @@ async function handleAnalyze() {
         row.className = `entry-item ${entry.is_suspected_ad ? "is-ad" : ""}`;
 
         const left = document.createElement("div");
-        left.style.display = "flex";
-        left.style.alignItems = "center";
-        left.style.gap = "0.5rem";
+        left.className = "entry-left";
 
         const cb = document.createElement("input");
         cb.type = "checkbox";
@@ -368,6 +469,12 @@ els.btnPaste.addEventListener("click", async () => {
 
 els.btnAnalyze.addEventListener("click", handleAnalyze);
 els.qualitySelect.addEventListener("change", updateQualityModeUI);
+els.urlInput.addEventListener("input", () => {
+  if (currentAnalysis) {
+    currentAnalysis = null;
+    resetQualityOptions();
+  }
+});
 
 els.btnPickFolder.addEventListener("click", async () => {
   els.btnPickFolder.disabled = true;
@@ -452,7 +559,11 @@ function renderJobs(jobs) {
         : ""
     }`;
     const qLabel = job.quality === "audio" ? "Audio" : job.quality === "best" ? "Beste" : `${job.quality}p`;
-    badge.textContent = `${qLabel} • ${(job.container || "mp4").toUpperCase()}`;
+    const resSuffix =
+      job.resolution && job.quality !== "audio" && job.resolution !== `${job.quality}p`
+        ? ` (${job.resolution})`
+        : "";
+    badge.textContent = `${qLabel}${resSuffix} • ${(job.container || "mp4").toUpperCase()}`;
 
     top.append(title, badge);
 
@@ -466,19 +577,18 @@ function renderJobs(jobs) {
     track.className = "progress-track";
     const fill = document.createElement("div");
     fill.className = "progress-fill";
-    fill.style.width = `${Math.min(100, Math.max(0, job.progress || 0))}%`;
+    fill.style.setProperty("--progress-pct", `${Math.min(100, Math.max(0, job.progress || 0))}%`);
     track.appendChild(fill);
 
     const actions = document.createElement("div");
     actions.className = "job-actions";
 
     const dirSpan = document.createElement("span");
-    dirSpan.style.color = "var(--muted)";
+    dirSpan.className = "job-dir";
     dirSpan.textContent = job.filename || job.output_dir || "";
 
     const btnGroup = document.createElement("div");
-    btnGroup.style.display = "flex";
-    btnGroup.style.gap = "0.4rem";
+    btnGroup.className = "job-btn-group";
 
     if (job.status === "downloading" || job.status === "queued" || job.status === "processing") {
       const cancelBtn = document.createElement("button");
