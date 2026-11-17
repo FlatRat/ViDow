@@ -406,24 +406,81 @@ def apply_impersonate_and_cookies(
             ydl_opts["cookiesfrombrowser"] = (cookies_browser,)
 
 
+def _decode_kvs_url(video_url: str, license_code: str) -> str:
+    """Entschlüsselt verschleierte KVS-URLs ('function/0/https://...') anhand des license_code."""
+    if not video_url.startswith("function/0/"):
+        return video_url
+    if not license_code:
+        return video_url[len("function/0/") :]
+    try:
+        from yt_dlp.extractor.generic import GenericIE
+
+        return GenericIE._kvs_get_real_url(video_url, license_code)
+    except Exception:
+        return video_url[len("function/0/") :]
+
+
+def _parse_height_hint(text: str) -> int | None:
+    """Extrahiert eine Auflösungs-Höhe (z. B. 1080, 720, 480) aus einem Label oder einer URL."""
+    if not text:
+        return None
+    if re.fullmatch(r"\d{3,4}", text.strip()):
+        val = int(text.strip())
+        if val in {144, 240, 360, 480, 540, 720, 1080, 1440, 2160, 4320}:
+            return val
+    if re.search(r"\b(?:4k|2160p?)\b", text, re.IGNORECASE):
+        return 2160
+    if re.search(r"\b(?:2k|1440p?)\b", text, re.IGNORECASE):
+        return 1440
+    m = re.search(r"(?:^|[^\d])(2160|1440|1080|720|540|480|360|240|144)[pP]?(?:$|[^\d])", text)
+    if m:
+        return int(m.group(1))
+    return None
+
+
 def extract_direct_stream_from_html(
     html: str, page_url: str, video_id: str = "direct-stream"
 ) -> dict[str, Any] | None:
     """
-    Sucht direkt im HTML-Code einer Seite (oder einer /embed/-Seite) nach
-    flashvars / mediaDefinitions oder direkten .m3u8/.mp4-Streams, falls der
-    reguläre yt-dlp-Extractor mit HTTP 410/403 abbricht.
+    Sucht direkt im HTML-Code einer Seite (oder einer /embed/-Seite) nach:
+    1. PornHub flashvars / mediaDefinitions (inkl. HLS-Master-Playlists & Einzel-Auflösungen)
+    2. KVS (Kernel Video Sharing / kt_player) flashvars & verschleierten 'function/0/'-Streams
+    3. JSON-LD VideoObject / OpenGraph / Twitter-Stream-Metadaten
+    4. HTML5 <video>/<source>-Tags sowie direkten .m3u8/.mp4-Streams
+    Greift als Fallback, wenn yt-dlp z.B. mit '[generic] Unable to extract flashvars' oder HTTP 403/410 abbricht.
     """
-    title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
-    clean_title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else "Video-Stream"
+    if not html:
+        return None
 
-    # 1. Prüfe auf flashvars / mediaDefinitions (einzeiliges JSON-Objekt)
-    flashvars_match = re.search(r"var\s+flashvars_\d+\s*=\s*(\{.+?\});\s*\r?\n", html)
+    og_title_m = re.search(
+        r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+        html,
+        re.IGNORECASE,
+    )
+    h1_m = re.search(r"<h1[^>]*>(.*?)</h1>", html, re.IGNORECASE | re.DOTALL)
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+
+    raw_title = (
+        (og_title_m.group(1) if og_title_m else "")
+        or (re.sub(r"<[^>]+>", "", h1_m.group(1)) if h1_m else "")
+        or (title_match.group(1) if title_match else "")
+    )
+    clean_title = re.sub(r"\s+", " ", raw_title).strip() or "Video-Stream"
+
+    og_thumb_m = re.search(
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+        html,
+        re.IGNORECASE,
+    )
+    default_thumb = urllib.parse.urljoin(page_url, og_thumb_m.group(1).strip()) if og_thumb_m else None
+
+    # 1. Prüfe auf PornHub-artige flashvars_<id> / mediaDefinitions
+    flashvars_match = re.search(r"(?:var|let|const)?\s*flashvars_\d+\s*=\s*(\{[\s\S]+?\});", html)
     if flashvars_match:
         try:
             fv = json.loads(flashvars_match.group(1))
             clean_title = fv.get("video_title") or clean_title
-            thumb = fv.get("image_url")
+            thumb = fv.get("image_url") or default_thumb
             duration = fv.get("video_duration")
             media_defs = fv.get("mediaDefinitions") or []
             master_url = ""
@@ -471,11 +528,12 @@ def extract_direct_stream_from_html(
                         "url": quality_urls.get(h, best_url),
                         "height": h,
                         "format_id": f"{h}p",
+                        "http_headers": {"Referer": page_url},
                     }
                     for h in sorted_heights
-                ] or [{"url": best_url}]
+                ] or [{"url": best_url, "http_headers": {"Referer": page_url}}]
                 return {
-                    "id": video_id or "direct-stream",
+                    "id": str(fv.get("video_id") or video_id or "direct-stream"),
                     "title": clean_title,
                     "url": best_url,
                     "master_url": master_url,
@@ -484,31 +542,220 @@ def extract_direct_stream_from_html(
                     "thumbnail": thumb,
                     "duration": int(duration) if str(duration).isdigit() else None,
                     "extractor_key": "DirectStreamFallback",
+                    "http_headers": {"Referer": page_url},
                     "formats": formats_list,
                 }
         except Exception:
             pass
 
-    # 2. Prüfe auf direkte .m3u8 oder .mp4 Quellen im HTML
-    stream_matches = re.findall(
-        r'["\'](https?://[^"\'\s<>]+?\.(?:m3u8|mp4)(?:\?[^"\'\s<>]*)?)["\']',
+    # 2. Prüfe auf KVS (Kernel Video Sharing / kt_player) flashvars (inkl. 'function/0/' Lizenz-Entschlüsselung)
+    kvs_url_matches = re.findall(
+        r"""['"]?(video_(?:url|alt_url\d*))['"]?\s*:\s*['"]((?:function/0/)?(?:https?:)?//[^'"]+|(?:function/0/)?/[^'"]*get_file/[^'"]+)['"]""",
+        html,
+    )
+    if kvs_url_matches:
+        lic_m = re.search(r"""['"]?license_code['"]?\s*:\s*['"]([^'"]+)['"]""", html)
+        license_code = lic_m.group(1) if lic_m else ""
+        text_labels = dict(
+            re.findall(
+                r"""['"]?(video_(?:url|alt_url\d*)_text)['"]?\s*:\s*['"]([^'"]+)['"]""",
+                html,
+            )
+        )
+        vid_id_m = re.search(r"""['"]?video_id['"]?\s*:\s*['"]?(\d+)['"]?""", html)
+        vid_title_m = re.search(r"""['"]?video_title['"]?\s*:\s*['"]([^'"]+)['"]""", html)
+        preview_m = re.search(r"""['"]?preview_url['"]?\s*:\s*['"]([^'"]+)['"]""", html)
+
+        if vid_title_m and vid_title_m.group(1).strip():
+            clean_title = vid_title_m.group(1).strip()
+        thumb = urllib.parse.urljoin(page_url, preview_m.group(1)) if preview_m else default_thumb
+
+        kvs_formats: list[dict[str, Any]] = []
+        kvs_quality_urls: dict[int, str] = {}
+        seen_urls: set[str] = set()
+        for key, raw_val in kvs_url_matches:
+            raw_val = raw_val.replace("\\/", "/").strip()
+            decoded = _decode_kvs_url(raw_val, license_code)
+            full_url = urllib.parse.urljoin(page_url, decoded)
+            if not full_url.startswith("http") or full_url in seen_urls:
+                continue
+            seen_urls.add(full_url)
+            label = text_labels.get(f"{key}_text", "")
+            height = _parse_height_hint(label) or _parse_height_hint(full_url)
+            if height:
+                kvs_quality_urls[height] = full_url
+            fmt_ext = "m3u8" if ".m3u8" in full_url.lower() else "mp4"
+            kvs_formats.append(
+                {
+                    "format_id": re.sub(r"[^\w-]", "_", label or key),
+                    "url": full_url,
+                    "ext": fmt_ext,
+                    "height": height,
+                    "http_headers": {"Referer": page_url},
+                }
+            )
+
+        if kvs_formats:
+            kvs_formats.sort(key=lambda f: f.get("height") or 0)
+            best_fmt = kvs_formats[-1]
+            return {
+                "id": vid_id_m.group(1) if vid_id_m else (video_id or "kvs-stream"),
+                "title": clean_title,
+                "url": best_fmt["url"],
+                "master_url": best_fmt["url"] if best_fmt.get("ext") == "m3u8" else "",
+                "quality_urls": kvs_quality_urls,
+                "webpage_url": page_url,
+                "thumbnail": thumb,
+                "extractor_key": "KVSFallback",
+                "http_headers": {"Referer": page_url},
+                "direct_formats": best_fmt.get("ext") == "mp4",
+                "formats": kvs_formats,
+            }
+
+    # 3. Prüfe auf JSON-LD (VideoObject contentUrl) und OpenGraph / Twitter-Stream-Tags
+    meta_stream_matches = re.findall(
+        r"""(?:["']contentUrl["']\s*:\s*["']|<meta[^>]+(?:property|name)=["'](?:og:video(?::(?:url|secure_url))?|twitter:player:stream)["'][^>]+content=["'])(https?://[^"'<>\\\s]+)["']""",
         html,
         re.IGNORECASE,
     )
-    filtered = [u.replace("\\/", "/") for u in stream_matches if not AD_PATTERNS.search(u)]
-    if filtered:
-        best_url = next((u for u in filtered if ".m3u8" in u.lower()), filtered[0])
+    for m_url in meta_stream_matches:
+        m_url = m_url.replace("\\/", "/")
+        if re.search(r"\.(?:mp4|m3u8|webm|mov)(?:\?|$)", m_url, re.IGNORECASE) or "/get_file/" in m_url:
+            if not AD_PATTERNS.search(m_url):
+                fmt_ext = "m3u8" if ".m3u8" in m_url.lower() else "mp4"
+                h = _parse_height_hint(m_url)
+                return {
+                    "id": video_id or "meta-stream",
+                    "title": clean_title,
+                    "url": m_url,
+                    "master_url": m_url if fmt_ext == "m3u8" else "",
+                    "quality_urls": {h: m_url} if h else {},
+                    "webpage_url": page_url,
+                    "thumbnail": default_thumb,
+                    "extractor_key": "MetaStreamFallback",
+                    "http_headers": {"Referer": page_url},
+                    "direct_formats": fmt_ext == "mp4",
+                    "formats": [{"url": m_url, "ext": fmt_ext, "height": h, "http_headers": {"Referer": page_url}}],
+                }
+
+    # 4. Prüfe auf HTML5 <video>/<source>-Tags und direkte .m3u8/.mp4/get_file Quellen im HTML/JS
+    tag_sources = re.findall(
+        r"<(?:video|source)\b[^>]*?\bsrc\s*=\s*[\"']([^\"'<>+\s]+)[\"']([^>]*)",
+        html,
+        re.IGNORECASE,
+    )
+    html5_formats: list[dict[str, Any]] = []
+    html5_quality_urls: dict[int, str] = {}
+    seen_html5: set[str] = set()
+    for raw_src, rest_attrs in tag_sources:
+        full_src = urllib.parse.urljoin(page_url, raw_src.replace("\\/", "/").replace("&amp;", "&"))
+        if not full_src.startswith("http") or AD_PATTERNS.search(full_src) or full_src in seen_html5:
+            continue
+        if any(full_src.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".vtt", ".srt")):
+            continue
+        seen_html5.add(full_src)
+        h = _parse_height_hint(rest_attrs) or _parse_height_hint(full_src)
+        if h:
+            html5_quality_urls[h] = full_src
+        fmt_ext = "m3u8" if ".m3u8" in full_src.lower() else "mp4"
+        html5_formats.append(
+            {
+                "url": full_src,
+                "ext": fmt_ext,
+                "height": h,
+                "http_headers": {"Referer": page_url},
+            }
+        )
+
+    stream_matches = re.findall(
+        r'["\'](https?:?(?:\\/\\/|//)[^"\'\s<>]+?(?:\.(?:m3u8|mp4)|/get_file/[^"\'\s<>]+)(?:\?[^"\'\s<>]*)?)["\']',
+        html,
+        re.IGNORECASE,
+    )
+    for raw_u in stream_matches:
+        clean_u = raw_u.replace("\\/", "/").replace("&amp;", "&")
+        if clean_u.startswith("//"):
+            clean_u = "https:" + clean_u
+        if AD_PATTERNS.search(clean_u) or clean_u in seen_html5:
+            continue
+        # Überspringe winzige Hover-Vorschauclips, sofern andere Streams existieren
+        if re.search(r"(?:_preview|preview_|/trailers?/|/thumbs?/)", clean_u, re.IGNORECASE) and html5_formats:
+            continue
+        seen_html5.add(clean_u)
+        h = _parse_height_hint(clean_u)
+        if h:
+            html5_quality_urls[h] = clean_u
+        fmt_ext = "m3u8" if ".m3u8" in clean_u.lower() else "mp4"
+        html5_formats.append(
+            {
+                "url": clean_u,
+                "ext": fmt_ext,
+                "height": h,
+                "http_headers": {"Referer": page_url},
+            }
+        )
+
+    if html5_formats:
+        # Sortiere echte Streams vor etwaige Preview-Clips, bevorzuge .m3u8 Master-Playlists und hohe Auflösungen
+        html5_formats.sort(
+            key=lambda f: (
+                0 if re.search(r"(?:_preview|preview_|/trailers?/)", f["url"], re.IGNORECASE) else 1,
+                1 if f.get("ext") == "m3u8" else 0,
+                f.get("height") or 0,
+            )
+        )
+        best_fmt = html5_formats[-1]
+        best_url = best_fmt["url"]
         return {
             "id": video_id or "direct-html-stream",
             "title": clean_title,
             "url": best_url,
             "master_url": best_url if ".m3u8" in best_url.lower() else "",
-            "quality_urls": {},
+            "quality_urls": html5_quality_urls,
             "webpage_url": page_url,
+            "thumbnail": default_thumb,
             "extractor_key": "HTML5StreamFallback",
-            "formats": [{"url": best_url}],
+            "http_headers": {"Referer": page_url},
+            "direct_formats": best_fmt.get("ext") == "mp4",
+            "formats": html5_formats,
         }
     return None
+
+
+def _extract_embed_candidates(html: str, page_url: str) -> list[str]:
+    """Sucht nach eingebetteten Player-Iframes (/embed/...) oder alternativen Embed-URLs einer Videoseite."""
+    candidates: list[str] = []
+    parsed_page = urllib.parse.urlparse(page_url)
+    base_origin = f"{parsed_page.scheme}://{parsed_page.netloc}" if parsed_page.netloc else ""
+
+    # 1. Wenn die URL dem typischen KVS-/Tube-Schema /videos/<id>/ oder /video/<id>/ entspricht -> /embed/<id>
+    kvs_path_m = re.search(r"/(?:videos?|v|watch)/(\d+)(?:/|$)", parsed_page.path, re.IGNORECASE)
+    if kvs_path_m and base_origin:
+        vid_id = kvs_path_m.group(1)
+        candidates.append(f"{base_origin}/embed/{vid_id}/")
+        candidates.append(f"{base_origin}/embed/{vid_id}")
+
+    if html:
+        # 2. <iframe src="..."> im HTML suchen
+        for iframe_src in re.findall(r'<iframe\b[^>]+?\bsrc\s*=\s*["\']([^"\']+)["\']', html, re.IGNORECASE):
+            iframe_url = urllib.parse.urljoin(page_url, iframe_src.replace("&amp;", "&").strip())
+            if not iframe_url.startswith("http") or AD_PATTERNS.search(iframe_url):
+                continue
+            if any(
+                skip in iframe_url.lower()
+                for skip in ("googletagmanager", "google.com/recaptcha", "facebook.com", "twitter.com", "exoclick", "juicyads", "trafficjunky")
+            ):
+                continue
+            candidates.append(iframe_url)
+
+        # 3. video_id aus dem HTML lesen, falls die URL keinen numerischen Pfad hatte
+        if not kvs_path_m and base_origin:
+            vid_id_m = re.search(r"""['"]?video_id['"]?\s*:\s*['"]?(\d+)['"]?""", html)
+            if vid_id_m:
+                vid_id = vid_id_m.group(1)
+                candidates.append(f"{base_origin}/embed/{vid_id}/")
+
+    return list(dict.fromkeys(c for c in candidates if c != page_url))
 
 
 def select_fallback_stream_url(fallback_info: dict[str, Any], ydl_opts: dict[str, Any]) -> str:
@@ -541,10 +788,16 @@ def select_fallback_stream_url(fallback_info: dict[str, Any], ydl_opts: dict[str
 
 
 def download_fallback_stream(
-    fallback_info: dict[str, Any], clean_opts: dict[str, Any]
+    fallback_info: dict[str, Any], clean_opts: dict[str, Any], referer_url: str = ""
 ) -> dict[str, Any]:
     """Lädt einen per HTML-Fallback gefundenen Stream unter Beibehaltung des echten Titels/ID."""
     fb_opts = dict(clean_opts)
+    merged_headers = dict(fb_opts.get("http_headers") or {})
+    if referer_url or fallback_info.get("webpage_url"):
+        merged_headers.setdefault("Referer", referer_url or str(fallback_info.get("webpage_url")))
+    if merged_headers:
+        fb_opts["http_headers"] = merged_headers
+
     stream_url = select_fallback_stream_url(fallback_info, fb_opts)
     raw_outtmpl = fb_opts.get("outtmpl")
     if isinstance(raw_outtmpl, str) and "%(title)" in raw_outtmpl:
@@ -558,6 +811,15 @@ def download_fallback_stream(
         has_res_token = "%(resolution" in raw_outtmpl
         suffix = "%(resolution& [{}]|)s.%(ext)s" if has_res_token else ".%(ext)s"
         fb_opts["outtmpl"] = os.path.join(out_dir, f"{safe_title} [{safe_id}]{suffix}")
+
+    if fallback_info.get("direct_formats") and fallback_info.get("formats") and not fallback_info.get("master_url"):
+        try:
+            with yt_dlp.YoutubeDL(fb_opts) as ydl_fb:
+                res = ydl_fb.process_ie_result(dict(fallback_info), download=True)
+                if isinstance(res, dict):
+                    return res
+        except Exception:
+            pass
 
     with yt_dlp.YoutubeDL(fb_opts) as ydl_fb:
         res = ydl_fb.extract_info(stream_url, download=True)
@@ -574,13 +836,36 @@ def fetch_url_even_on_error(target_url: str, headers: dict[str, str] | None = No
     import urllib.request
 
     req_headers = {
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Cookie": "age_verified=1; accessAgeDisclaimerPH=1; accessPH=1; platform=pc",
+        "Cookie": "age_verified=1; accessAgeDisclaimerPH=1; accessPH=1; platform=pc; kt_rt_popAccess=1; kt_tcookie=1; splash=1",
+        "Referer": target_url,
     }
     if headers:
         req_headers.update(headers)
 
+    # 1. Versuche über curl_cffi (Chrome TLS-Impersonation gegen Cloudflare/Bot-Schutz)
+    try:
+        from curl_cffi import requests as cffi_requests
+
+        resp = cffi_requests.get(
+            target_url,
+            headers=req_headers,
+            impersonate="chrome",
+            timeout=12,
+            allow_redirects=True,
+        )
+        if resp.text:
+            return resp.status_code, resp.text
+    except Exception:
+        pass
+
+    # 2. Fallback auf urllib
     req = urllib.request.Request(target_url, headers=req_headers)
     try:
         with urllib.request.urlopen(req, timeout=12) as resp:
@@ -604,10 +889,11 @@ def extract_info_with_fallback(
 ) -> dict[str, Any]:
     """
     Versucht regulär über yt-dlp zu extrahieren.
-    1. Falls ein ausgewählter Browser keine Cookie-Datenbank hat (z.B. Firefox nicht installiert),
+    1. Falls ein ausgewählter Browser keine Cookie-Datenbank hat (z.B. Firefox nicht installiert oder DB gesperrt),
        wird automatisch ohne Browser-Cookies wiederholt.
-    2. Falls ein HTTP Error 410 (Gone) oder 403 auftritt, wird die Original-Domain (z. B. de.pornhub.org)
-       direkt abgefragt und die Stream-URL aus flashvars extrahiert.
+    2. Falls yt-dlp mit '[generic] Unable to extract flashvars', HTTP 403/410 oder einem anderen Extractor-Fehler
+       abbricht, analysiert ViDow den HTML-Code der Seite (sowie etwaige /embed/-Iframes) direkt nach
+       KVS-flashvars ('function/0/'), mediaDefinitions, JSON-LD und direkten .m3u8/.mp4-Streams.
     """
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -617,8 +903,11 @@ def extract_info_with_fallback(
     except Exception as first_exc:
         first_err = re.sub(r"\x1b\[[0-9;]*m", "", str(first_exc))
 
-        # Automatischer Fallback, falls Browser-Cookies (z.B. Firefox) nicht gefunden oder gesperrt sind
-        if "cookies" in first_err.lower() or "operation not permitted" in first_err.lower():
+        # Automatischer Fallback, falls Browser-Cookies (z.B. Firefox/Chrome) nicht gefunden oder unter Windows gesperrt sind
+        if any(
+            kw in first_err.lower()
+            for kw in ("cookies", "operation not permitted", "permission denied", "could not copy", "dpapi")
+        ):
             clean_opts = dict(ydl_opts)
             clean_opts.pop("cookiesfrombrowser", None)
             save_settings({"cookies_browser": "none"})
@@ -634,46 +923,85 @@ def extract_info_with_fallback(
         clean_opts = dict(ydl_opts)
         clean_opts.pop("cookiesfrombrowser", None)
 
+        candidates: list[str] = [url]
         ph_match = re.search(
-            r"(?:viewkey=|/embed/|\[PornHub\]\s+)(ph[0-9a-f]+|\d+)",
+            r"(?:viewkey=|pornhub\.[a-z]+/embed/|\[PornHub\]\s+)(ph[0-9a-f]+|\d+)",
             f"{url} {first_err}",
             re.IGNORECASE,
         )
+        ph_video_id = ph_match.group(1) if ph_match else "direct-stream"
         if ph_match:
-            video_id = ph_match.group(1)
-            candidates = [
-                url,
-                f"https://de.pornhub.org/view_video.php?viewkey={video_id}",
-                f"https://www.pornhub.com/embed/{video_id}",
-            ]
-            for candidate_url in dict.fromkeys(candidates):
-                status_code, html = fetch_url_even_on_error(candidate_url, custom_headers)
-                if html:
-                    fallback_info = extract_direct_stream_from_html(html, url, video_id=video_id)
-                    if fallback_info:
-                        if download:
-                            return download_fallback_stream(fallback_info, clean_opts)
-                        return fallback_info
+            candidates.extend(
+                [
+                    f"https://de.pornhub.org/view_video.php?viewkey={ph_video_id}",
+                    f"https://www.pornhub.com/embed/{ph_video_id}",
+                ]
+            )
 
-                    if status_code == 410 or re.search(
-                        r"(This video has been disabled|Video has been removed|has been flagged|noVideo)",
-                        html,
-                        re.IGNORECASE,
-                    ):
-                        if "pornhub." not in url.lower():
-                            _, main_html = fetch_url_even_on_error(url, custom_headers)
-                            main_fallback = extract_direct_stream_from_html(
-                                main_html, url, video_id=video_id
-                            )
-                            if main_fallback:
-                                if download:
-                                    return download_fallback_stream(main_fallback, clean_opts)
-                                return main_fallback
+        checked_urls: set[str] = set()
+        last_html = ""
+        last_status = 0
 
-                        raise ValueError(
-                            f"Das Video ({video_id}) existiert auf dem Server nicht mehr (HTTP 410: Gone – "
-                            "vom Anbieter gelöscht oder deaktiviert)."
-                        ) from first_exc
+        while candidates:
+            candidate_url = candidates.pop(0)
+            if candidate_url in checked_urls:
+                continue
+            checked_urls.add(candidate_url)
+
+            status_code, html = fetch_url_even_on_error(candidate_url, custom_headers)
+            if html:
+                last_html = html
+                last_status = status_code
+
+                fallback_info = extract_direct_stream_from_html(
+                    html, candidate_url, video_id=ph_video_id
+                )
+                if fallback_info:
+                    if download:
+                        return download_fallback_stream(
+                            fallback_info, clean_opts, referer_url=candidate_url
+                        )
+                    return fallback_info
+
+                # Suche nach eingebetteten /embed/-Playern oder Iframes auf der Seite
+                for embed_url in _extract_embed_candidates(html, candidate_url):
+                    if embed_url not in checked_urls and embed_url not in candidates:
+                        candidates.append(embed_url)
+
+            # Falls es sich um eine entdeckte /embed/-Alternativ-URL handelt, auch regulär über yt-dlp testen
+            if candidate_url != url and "/embed/" in candidate_url:
+                try:
+                    embed_opts = dict(clean_opts)
+                    embed_headers = dict(embed_opts.get("http_headers") or {})
+                    embed_headers.setdefault("Referer", url)
+                    embed_opts["http_headers"] = embed_headers
+                    with yt_dlp.YoutubeDL(embed_opts) as ydl_emb:
+                        emb_info = ydl_emb.extract_info(candidate_url, download=download)
+                        if emb_info:
+                            return emb_info
+                except Exception:
+                    pass
+
+        if last_html:
+            if re.search(
+                r"(This video is a private video|private video\.\s*You must be friends|requires a password|Bitte einloggen|Login required)",
+                last_html,
+                re.IGNORECASE,
+            ):
+                raise ValueError(
+                    "Dieses Video ist auf der Webseite als privat oder passwortgeschützt markiert "
+                    "(deshalb enthält die Seite keine öffentlichen Player-Daten/'flashvars'). "
+                    "Tipp: Falls du im Browser Zugriff hast, wähle in ViDow unter 'Browser-Cookies' deinen Browser aus."
+                ) from first_exc
+
+            if last_status == 410 or re.search(
+                r"(This video has been disabled|Video has been removed|This video is no longer available|has been flagged|noVideo)",
+                last_html,
+                re.IGNORECASE,
+            ):
+                raise ValueError(
+                    "Das Video existiert auf dem Server nicht mehr (vom Anbieter gelöscht oder deaktiviert)."
+                ) from first_exc
 
         raise first_exc
 
