@@ -10,6 +10,8 @@ ViDow.app/
 dist/
 build/
 *.spec
+*.dmg
+*.zip
 
 # Lokale Einstellungen & temporäre Dateien
 settings.json

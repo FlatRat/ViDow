@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """
-ViDow — Build-Skript für Windows
-Kompiliert ViDow mit PyInstaller zu einer eigenständigen Windows-Anwendung (ViDow.exe)
-inklusive Icon und statischen Web-Assets.
+ViDow 2.0 — Standalone Windows App- & Release-ZIP-Builder
+Kompiliert ViDow mit PyInstaller zu einer komplett eigenständigen Windows-Anwendung
+('dist/ViDow/ViDow.exe') inklusive integriertem ffmpeg (imageio-ffmpeg), neuen
+Studio-Icons (.ico) und schnürt ein versandfertiges Release-Archiv ('dist/ViDow-2.0.0-Windows-x64.zip').
 """
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
+
+APP_VERSION = "2.0.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+DIST_DIR = BASE_DIR / "dist"
 ICON_FILE = STATIC_DIR / "icon.ico"
 
 if sys.platform == "win32":
@@ -25,50 +29,56 @@ if sys.platform == "win32":
             pass
 
 
+def package_windows_zip(app_folder: Path, zip_path: Path) -> None:
+    """Verpackt dist/ViDow sowie den optionalen Browser-Helper in ein auslieferbares ZIP-Archiv."""
+    if zip_path.exists():
+        zip_path.unlink()
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for file_path in app_folder.rglob("*"):
+            if file_path.is_file():
+                arcname = Path("ViDow") / file_path.relative_to(app_folder)
+                zf.write(file_path, arcname)
+
+        ext_dir = BASE_DIR / "extension"
+        if ext_dir.is_dir():
+            for ext_file in ext_dir.rglob("*"):
+                if ext_file.is_file():
+                    arcname = Path("ViDow") / "extension" / ext_file.relative_to(ext_dir)
+                    zf.write(ext_file, arcname)
+
+
 def build() -> None:
     if sys.platform != "win32":
         print("Dieses Build-Skript ist für Windows gedacht.")
-        return
+        sys.exit(1)
 
-    # UTF-8 Konsole
-    if hasattr(sys.stdout, "reconfigure"):
+    print("=" * 64)
+    print(f"🎬 ViDow v{APP_VERSION} — Native Windows Standalone Build")
+    print("=" * 64)
+
+    # 1. Abhängigkeiten & Icons sicherstellen
+    for pkg, mod in [
+        ("pillow", "PIL"),
+        ("imageio-ffmpeg", "imageio_ffmpeg"),
+        ("pyinstaller", "PyInstaller"),
+    ]:
         try:
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+            __import__(mod)
+        except ImportError:
+            print(f"⬇️ Installiere {pkg}...")
+            subprocess.run([sys.executable, "-m", "pip", "install", pkg], check=True)
 
-    print("=" * 60)
-    print("🎬 ViDow — Windows Build (PyInstaller)")
-    print("=" * 60)
+    from generate_icons import generate_all_icons
 
-    # 1. Sicherstellen, dass icon.ico existiert
-    if not ICON_FILE.is_file():
-        print("Erzeuge static/icon.ico...")
-        try:
-            from PIL import Image
+    generate_all_icons()
 
-            img = Image.open(STATIC_DIR / "icon.png")
-            img.save(
-                ICON_FILE,
-                format="ICO",
-                sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
-            )
-        except Exception as exc:
-            print(f"Konnte icon.ico nicht erzeugen ({exc}), fahre fort...")
-
-    # 2. PyInstaller prüfen
-    try:
-        import PyInstaller
-    except ImportError:
-        print("⬇️ Installiere PyInstaller...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller"], check=True)
-
-    # 3. PyInstaller Befehl zusammenstellen
+    # 2. PyInstaller Befehl zusammenstellen
     cmd = [
         sys.executable,
         "-m",
         "PyInstaller",
         "--noconfirm",
+        "--clean",
         "--onedir",
         "--windowed",
         "--name",
@@ -81,6 +91,8 @@ def build() -> None:
         "curl_cffi",
         "--collect-all",
         "webview",
+        "--collect-all",
+        "imageio_ffmpeg",
     ]
 
     if ICON_FILE.is_file():
@@ -88,19 +100,28 @@ def build() -> None:
 
     cmd.append(str(BASE_DIR / "app.py"))
 
-    print("\n📦 Erzeuge Windows-Bundle in 'dist/ViDow/'...")
+    print("\n📦 Erzeuge eigenständiges Windows-Programm in 'dist/ViDow/'...")
     res = subprocess.run(cmd)
-
-    if res.returncode == 0:
-        exe_path = BASE_DIR / "dist" / "ViDow" / "ViDow.exe"
-        print("\n" + "=" * 60)
-        print(f"✅ ViDow erfolgreich gebaut!")
-        print(f"📁 Programm-Ordner: {BASE_DIR / 'dist' / 'ViDow'}")
-        if exe_path.is_file():
-            print(f"🚀 Startdatei: {exe_path}")
-        print("=" * 60)
-    else:
+    if res.returncode != 0:
         print("\n❌ Build fehlgeschlagen. Siehe Fehlermeldungen oben.")
+        sys.exit(res.returncode)
+
+    app_folder = DIST_DIR / "ViDow"
+    exe_path = app_folder / "ViDow.exe"
+    zip_path = DIST_DIR / f"ViDow-{APP_VERSION}-Windows-x64.zip"
+
+    print(f"🗜️ Erzeuge auslieferbares Archiv: {zip_path.name}...")
+    package_windows_zip(app_folder, zip_path)
+
+    print("\n" + "=" * 64)
+    print("✅ Native Windows-App erfolgreich gebaut!")
+    print(f"📁 Programm-Ordner: {app_folder}")
+    if exe_path.is_file():
+        print(f"🚀 Startdatei:      {exe_path}")
+    if zip_path.is_file():
+        size_mb = zip_path.stat().st_size / (1024 * 1024)
+        print(f"📦 Release-ZIP:     {zip_path} ({size_mb:.1f} MB)")
+    print("=" * 64)
 
 
 if __name__ == "__main__":

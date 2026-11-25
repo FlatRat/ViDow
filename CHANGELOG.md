@@ -7,35 +7,31 @@ und das Projekt folgt [Semantic Versioning](https://semver.org/lang/de/).
 
 ---
 
+## [2.0.0] - 2026-11-25
+
+### ✨ Hinzugefügt (Native Standalone-Auslieferung, Studio-UI & neues Icon)
+- **Auslieferbare macOS-App & `.dmg`-Installer (`build_mac_app.py`):** Kompiliert ViDow per PyInstaller zu einem komplett eigenständigen, ad-hoc-signierten `ViDow.app`-Bundle sowie einem versandfertigen `ViDow-2.0.0-macOS.dmg` Disk-Image (inkl. `/Applications`-Symlink und App Transport Security Konfiguration).
+- **Auslieferbares Windows-Release-Archiv (`build_windows_exe.py`):** Verpackt den eigenständigen Windows-Build automatisch als `ViDow-2.0.0-Windows-x64.zip` inklusive Browser-Erweiterung.
+- **Integriertes Zero-Setup `ffmpeg` (`imageio-ffmpeg`):** Liefert ein eingebettetes statisches `ffmpeg`-Binary direkt im App-Paket mit, falls auf dem Zielgerät kein System-`ffmpeg` installiert ist.
+- **Automatisierte GitHub Actions Release-Pipeline (`.github/workflows/release.yml`):** Baut macOS-DMG und Windows-ZIP automatisch in der Cloud und hängt sie bei Versions-Tags (`v*`) an GitHub Releases an.
+- **Neues Studio-UI & Farbschema-Steuerung:** Komplett überarbeitetes Desktop-Interface mit kompakter Top-Bar, Spotlight-URL-Eingabe, klickbaren Qualitäts-Chips, Video/Audio-Modus-Umschalter, aufklappbaren Schutz-Sektionen (`<details>`) und System/Hell/Dunkel-Darstellungswahl.
+- **Neues Studio-App-Icon (`generate_icons.py`):** Hochauflösender plattformübergreifender 2048px-Supersampling-Generator für `AppIcon.icns`, `icon.ico`, `icon.png`, `icon.svg` und die Browser-Extension-Icons (`16px`, `48px`, `128px`).
+
+### 🛠️ Behoben & Verbessert
+- **OS-konformer Einstellungs- & Log-Pfad:** Speichert `settings.json` und Windowed-Logs nun im nativen Benutzerverzeichnis (`~/Library/Application Support/ViDow` bzw. `%APPDATA%\ViDow`), sodass schreibgeschützte Installationen unter `/Applications` oder `Program Files` fehlerfrei funktionieren.
+- **Hochkantvideos & Multi-Qualitäts-Downloads:** Orientierungsunabhängige Qualitätsstufen (`res:<Stufe>` inkl. `540p`/`240p`), KVS-/Iframe-/HTML5-Stream-Fallbacks und auflösungsbasierte Dateinamen.
+
+---
+
 ## [1.1.0] - 2026-10-21
 
 ### ✨ Hinzugefügt (Windows-Unterstützung & Cross-Platform)
-- **Nativer Windows-Support:** ViDow läuft ab sofort vollständig und nativ unter Windows 10/11 im eigenen Desktop-Fenster (via Microsoft Edge WebView2 / `pywebview`).
-- **Doppelklick-Starter [`ViDow.bat`](ViDow.bat):** Richtet beim ersten Aufruf automatisch die virtuelle Python-Umgebung (`.venv`) ein, prüft Abhängigkeiten und startet die App.
-- **Lautloser Starter [`ViDow-NoConsole.vbs`](ViDow-NoConsole.vbs):** Ermöglicht den Start direkt als Desktop-App ohne offenes schwarzes Terminalfenster.
-- **Desktop-Verknüpfung [`create_windows_shortcut.py`](create_windows_shortcut.py):** Erstellt per Befehl eine Windows-Desktop-Verknüpfung mit offiziellem App-Icon.
-- **Standalone Build [`build_windows_exe.py`](build_windows_exe.py):** Kompiliert ViDow mit PyInstaller zu einer eigenständigen Windows-Anwendung unter `dist/ViDow/ViDow.exe`.
-- **Automatische FFmpeg-Erkennung unter Windows:** Sucht `ffmpeg` im System-`PATH` sowie in WinGet (`Gyan.FFmpeg`), Scoop, Chocolatey und lokalen Verzeichnissen.
-- **Dateimanager-Integration:** Downloads lassen sich per Klick direkt im Windows Explorer markieren und öffnen (`explorer.exe /select,...`).
-- **Nativer Ordnerauswahl-Dialog:** Windows-spezifischer Fallback für den nativen Ordner-Dialog via `FolderBrowserDialog` und `tkinter`.
-- **System-Zwischenablage für Windows:** URL-Einfügen aus der Zwischenablage funktioniert nun auch unter Windows zuverlässig.
-- **Browser-Cookies unter Windows:** Cookie-Pfade für Google Chrome, Microsoft Edge, Brave und Mozilla Firefox unter `%LOCALAPPDATA%` und `%APPDATA%` integriert.
-- **Windows Taskleiste & Icon:** Eindeutige App-Identifikation via `AppUserModelID` (`FlatRat.ViDow.App.1.0`) und Multi-Resolution-Icon [`static/icon.ico`](static/icon.ico).
-
-### 🛠️ Behoben & Verbessert
-- **Konsolen-Encoding:** UTF-8 wird auf Windows-Konsolen erzwungen, wodurch `UnicodeEncodeError` bei Emojis und Sonderzeichen auf Standard-Windows-Konsolen (CP1252) verhindert werden.
-- **Dynamische UI-Labels:** Buttons und Hinweistexte passen sich automatisch dem Betriebssystem an („Im Explorer zeigen“ auf Windows, „Im Finder zeigen“ auf macOS).
-- **Dokumentation:** Ausführliche Anleitung für Windows und macOS in der [`README.md`](README.md) ergänzt.
+- **Nativer Windows-Support:** ViDow läuft vollständig unter Windows 10/11 im eigenen Desktop-Fenster (Microsoft Edge WebView2 / `pywebview`).
+- **Starter & Tools:** `ViDow.bat`, `ViDow-NoConsole.vbs`, `create_windows_shortcut.py` und `build_windows_exe.py`.
 
 ---
 
 ## [1.0.0] - 2026-10-15
 
 ### ✨ Initiale Veröffentlichung (macOS)
-- Lokaler Video-Downloader & Stream-Sniffer für macOS (via `yt-dlp`, `curl-cffi`, `ffmpeg`).
-- Eigenständiges macOS-Programmfenster über natives WebKit (`pywebview`).
-- Generierung des macOS-App-Bundles `ViDow.app` via `build_mac_app.py`.
-- Freie Auswahl von Auflösung (bis 4K), Video-Codec (H.264, HEVC, VP9, AV1) und Container (MP4, MKV, WebM, MOV) bzw. Audio-Extraktion.
-- 4-Stufen-Schutz gegen vorgeschaltete Pre-Roll-Werbung.
-- Optionale SponsorBlock-Integration zum Herausschneiden von Sponsorensegmenten.
-- Browser-Erweiterung für Chrome, Brave und Edge im Ordner `extension/`.
+- Lokaler Video-Downloader & Stream-Sniffer für macOS (`yt-dlp`, `curl-cffi`, `ffmpeg`, `pywebview`) inkl. Browser-Erweiterung.

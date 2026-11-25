@@ -7,7 +7,9 @@ automatische Pre-Roll-Werbe-Filterung, SponsorBlock-Zuschnitt und Browser-Extens
 
 from __future__ import annotations
 
+import io
 import json
+import multiprocessing
 import os
 import re
 import shutil
@@ -26,6 +28,43 @@ from typing import Any
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
+APP_VERSION = "2.0.0"
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+
+
+def get_user_config_dir() -> Path:
+    """Liefert das native, beschreibbare App-Datenverzeichnis des Betriebssystems."""
+    home = Path.home()
+    if sys.platform == "darwin":
+        cfg = home / "Library" / "Application Support" / "ViDow"
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
+        cfg = Path(appdata) / "ViDow"
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
+        cfg = Path(xdg) / "vidow"
+    try:
+        cfg.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return cfg
+
+
+USER_CONFIG_DIR = get_user_config_dir()
+
+# Bei kompilierten Windowed-Builds (PyInstaller --windowed) sind stdout/stderr teils None.
+# Um Abstürze bei print() oder BaseHTTPRequestHandler.log_message() zu verhindern,
+# leiten wir fehlende Streams sauber in eine Logdatei im App-Datenordner um.
+if sys.stdout is None or sys.stderr is None:
+    try:
+        _log_stream: Any = open(USER_CONFIG_DIR / "vidow.log", "a", encoding="utf-8", buffering=1)
+    except OSError:
+        _log_stream = io.StringIO()
+    if sys.stdout is None:
+        sys.stdout = _log_stream
+    if sys.stderr is None:
+        sys.stderr = _log_stream
+
 # Auf Windows UTF-8 für Konsole erzwingen, um UnicodeEncodeErrors bei Emojis zu verhindern
 if sys.platform == "win32":
     if hasattr(sys.stdout, "reconfigure"):
@@ -39,9 +78,11 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "static"
-SETTINGS_FILE = BASE_DIR / "settings.json"
+BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+BASE_DIR = Path(sys.executable).resolve().parent if IS_FROZEN else Path(__file__).resolve().parent
+STATIC_DIR = BUNDLE_DIR / "static"
+SETTINGS_FILE = USER_CONFIG_DIR / "settings.json"
+LEGACY_SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
 DEFAULT_PORT = int(os.environ.get("VIDOW_PORT", "8765"))
 
 # Bekannte Werbe-Domains und URL-Muster für Stream-/Eintragsfilterung
@@ -55,22 +96,31 @@ AD_PATTERNS = re.compile(
 )
 
 
-def find_ffmpeg() -> str | None:
-    """Sucht ffmpeg im PATH sowie in typischen Windows-, macOS- und Linux-Pfaden."""
-    # 1. Direkte Suche im PATH
-    which_ffmpeg = shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
-    if which_ffmpeg and os.path.isfile(which_ffmpeg):
-        return which_ffmpeg
-
-    # 2. Projekt-lokaler Ordner (z. B. bin/ffmpeg.exe)
-    for cand in [
+def find_ffmpeg() -> tuple[str | None, bool]:
+    """
+    Sucht ffmpeg im System-PATH, im App-Bundle sowie über das eingebettete `imageio-ffmpeg`.
+    Gibt `(pfad, ist_eingebettet)` zurück, damit ausgelieferte Apps ohne manuelle Installation laufen.
+    """
+    # 1. Gebündeltes ffmpeg direkt im App-Paket / neben der ausführbaren Datei prüfen
+    bundle_candidates = [
+        BUNDLE_DIR / "bin" / "ffmpeg.exe",
+        BUNDLE_DIR / "ffmpeg.exe",
+        BUNDLE_DIR / "bin" / "ffmpeg",
+        BUNDLE_DIR / "ffmpeg",
         BASE_DIR / "bin" / "ffmpeg.exe",
         BASE_DIR / "ffmpeg.exe",
         BASE_DIR / "bin" / "ffmpeg",
         BASE_DIR / "ffmpeg",
-    ]:
-        if cand.is_file():
-            return str(cand)
+        BASE_DIR.parent / "Resources" / "ffmpeg",
+    ]
+    for cand in bundle_candidates:
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand), True
+
+    # 2. Direkte Suche im System-PATH
+    which_ffmpeg = shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
+    if which_ffmpeg and os.path.isfile(which_ffmpeg):
+        return which_ffmpeg, False
 
     # 3. Typische Windows-Installationspfade (WinGet, Scoop, Chocolatey, Standard-Pfade)
     if sys.platform == "win32":
@@ -85,7 +135,7 @@ def find_ffmpeg() -> str | None:
                 try:
                     for found in winget_dir.glob("**/ffmpeg.exe"):
                         if found.is_file():
-                            return str(found)
+                            return str(found), False
                 except Exception:
                     pass
 
@@ -97,23 +147,33 @@ def find_ffmpeg() -> str | None:
             Path("C:/ffmpeg/bin/ffmpeg.exe"),
         ]:
             if c.is_file():
-                return str(c)
+                return str(c), False
 
     # 4. Typische macOS Homebrew-Pfade
     if sys.platform == "darwin":
         for cand_str in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]:
             if os.path.isfile(cand_str) and os.access(cand_str, os.X_OK):
-                return cand_str
+                return cand_str, False
 
     # 5. Linux-Pfade
     for cand_str in ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"]:
         if os.path.isfile(cand_str) and os.access(cand_str, os.X_OK):
-            return cand_str
+            return cand_str, False
 
-    return None
+    # 6. Eingebettetes statisches ffmpeg aus imageio-ffmpeg (für auslieferbare Standalone-Builds)
+    try:
+        import imageio_ffmpeg
+
+        embedded_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if embedded_exe and os.path.isfile(embedded_exe):
+            return embedded_exe, True
+    except Exception:
+        pass
+
+    return None, False
 
 
-FFMPEG_PATH = find_ffmpeg()
+FFMPEG_PATH, FFMPEG_BUNDLED = find_ffmpeg()
 DEFAULT_OUTPUT_DIR = str(Path.home() / "Downloads" / "ViDow")
 
 
@@ -207,9 +267,14 @@ def load_settings() -> dict[str, Any]:
         "sponsorblock_cats": ["sponsor", "selfpromo", "intro", "outro"],
         "cookies_browser": "none",
     }
-    if SETTINGS_FILE.exists():
+    settings_source = (
+        SETTINGS_FILE
+        if SETTINGS_FILE.exists()
+        else (LEGACY_SETTINGS_FILE if not IS_FROZEN and LEGACY_SETTINGS_FILE.exists() else None)
+    )
+    if settings_source is not None:
         try:
-            saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            saved = json.loads(settings_source.read_text(encoding="utf-8"))
             defaults.update(saved)
         except Exception:
             pass
@@ -1682,6 +1747,8 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "app": "ViDow",
+                    "version": APP_VERSION,
+                    "is_bundled": IS_FROZEN,
                     "platform": sys.platform,
                     "os_label": (
                         "Windows"
@@ -1693,6 +1760,7 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
                     "file_manager_label": "Explorer" if sys.platform == "win32" else "Finder",
                     "yt_dlp_version": yt_dlp.version.__version__,
                     "ffmpeg_available": bool(FFMPEG_PATH),
+                    "ffmpeg_bundled": FFMPEG_BUNDLED,
                     "ffmpeg_path": FFMPEG_PATH,
                     "settings": effective_settings,
                     "output_dir_warning": dir_warning,
@@ -1927,7 +1995,9 @@ def apply_macos_dock_icon() -> None:
 
 def main() -> None:
     global ACTIVE_WINDOW
-    STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    multiprocessing.freeze_support()
+    if not IS_FROZEN:
+        STATIC_DIR.mkdir(parents=True, exist_ok=True)
     setup_windows_app_id()
     settings = load_settings()
     effective_output_dir, output_dir_warning = resolve_usable_output_dir(
@@ -1945,7 +2015,7 @@ def main() -> None:
             ffmpeg_status = "Nicht gefunden (bitte 'brew install ffmpeg' ausführen)"
 
     print("=" * 60)
-    print(f"🎬 ViDow läuft auf: {url}")
+    print(f"🎬 ViDow v{APP_VERSION} läuft auf: {url}")
     print(f"📂 Standard-Speicherort: {effective_output_dir}")
     if output_dir_warning:
         print(f"⚠️  {output_dir_warning}")
@@ -1973,11 +2043,12 @@ def main() -> None:
                 chosen_icon = None
 
             ACTIVE_WINDOW = webview.create_window(
-                "ViDow — Video Downloader",
+                "ViDow — Studio Video Downloader",
                 url,
-                width=1260,
+                width=1300,
                 height=860,
-                min_size=(920, 640),
+                min_size=(960, 640),
+                background_color="#0e0a19",
             )
 
             start_kwargs: dict[str, Any] = {}

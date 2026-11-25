@@ -1,210 +1,134 @@
 #!/usr/bin/env python3
 """
-Erzeugt das native macOS App-Bundle 'ViDow.app' inklusive hochauflösendem
-Vektor-Icon (exakt passend zum ViDow-Logo aus dem Dashboard) und setzt das Icon
-direkt für Finder (ViDow.app & ViDow.command), Dock und Browser-Extension.
+ViDow 2.0 — Standalone macOS App- & DMG-Builder
+Erzeugt ein komplett eigenständiges, auslieferbares macOS-App-Bundle ('ViDow.app')
+inklusive eingebetteter Python-Laufzeit, pywebview, yt-dlp, curl_cffi, integriertem
+ffmpeg (imageio-ffmpeg), Studio-Icons (.icns), Ad-hoc-Codesigning sowie einem
+versandfertigen 'ViDow-2.0.0-macOS.dmg' Disk-Image mit Applications-Symlink.
 """
 
 from __future__ import annotations
 
+import argparse
+import os
 import plistlib
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
-import AppKit
-import Foundation
+from generate_icons import generate_all_icons
+
+APP_VERSION = "2.0.0"
+BUNDLE_ID = "de.lucasgoedel.vidow"
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_BUNDLE = BASE_DIR / "ViDow.app"
 STATIC_DIR = BASE_DIR / "static"
-EXT_ICONS_DIR = BASE_DIR / "extension" / "icons"
+DIST_DIR = BASE_DIR / "dist"
+BUILD_DIR = BASE_DIR / "build"
+ROOT_APP_BUNDLE = BASE_DIR / "ViDow.app"
 
 
-def render_vidow_icon_nsimage(size: int = 1024) -> AppKit.NSImage:
-    """
-    Zeichnet das ViDow-Logo (blauer macOS-Squircle mit weißem Play-Dreieck und
-    Download-Pfeil rechts unten – exakt wie das SVG im Header) als Vektorgrafik.
-    """
-    img = AppKit.NSImage.alloc().initWithSize_(Foundation.NSMakeSize(size, size))
-    img.lockFocus()
+def _patch_info_plist(app_bundle: Path) -> None:
+    """Ergänzt wichtige macOS-Metadaten und ATS-Freigaben in Contents/Info.plist."""
+    plist_path = app_bundle / "Contents" / "Info.plist"
+    data: dict = {}
+    if plist_path.is_file():
+        with open(plist_path, "rb") as fp:
+            data = plistlib.load(fp)
 
-    ctx = AppKit.NSGraphicsContext.currentContext()
-    ctx.setShouldAntialias_(True)
-    ctx.setImageInterpolation_(AppKit.NSImageInterpolationHigh)
-
-    pad = size * 0.08
-    box_size = size - 2 * pad
-    radius = box_size * 0.225
-    rect = Foundation.NSMakeRect(pad, pad, box_size, box_size)
-
-    # Hintergrund-Squircle mit Farbverlauf (#3B82F6 oben -> #1D4ED8 unten)
-    bg_path = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-        rect, radius, radius
+    data.update(
+        {
+            "CFBundleName": "ViDow",
+            "CFBundleDisplayName": "ViDow",
+            "CFBundleIdentifier": BUNDLE_ID,
+            "CFBundleVersion": APP_VERSION,
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundlePackageType": "APPL",
+            "CFBundleIconFile": "AppIcon.icns",
+            "LSMinimumSystemVersion": "11.0",
+            "LSApplicationCategoryType": "public.app-category.video",
+            "NSHighResolutionCapable": True,
+            "NSSupportsAutomaticGraphicsSwitching": True,
+            # Erlaubt WebKit den Zugriff auf den lokalen ViDow-HTTP-Server (127.0.0.1)
+            # sowie Vorschaubilder externer Video-Plattformen
+            "NSAppTransportSecurity": {
+                "NSAllowsArbitraryLoads": True,
+                "NSAllowsLocalNetworking": True,
+            },
+        }
     )
-    top_color = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(
-        0.22, 0.48, 0.96, 1.0
-    )
-    bottom_color = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(
-        0.11, 0.28, 0.82, 1.0
-    )
-    gradient = AppKit.NSGradient.alloc().initWithStartingColor_endingColor_(
-        bottom_color, top_color
-    )
-    gradient.drawInBezierPath_angle_(bg_path, 90.0)
-
-    # Dezenter heller Innenrahmen
-    AppKit.NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.18).setStroke()
-    bg_path.setLineWidth_(size * 0.012)
-    bg_path.stroke()
-
-    # Koordinaten-Helfer: rechnet die 24x24 SVG-ViewBox (y von oben nach unten)
-    # in das macOS-Koordinatensystem (y von unten nach oben) innerhalb des Icons um.
-    inner_pad = size * 0.23
-    inner_span = size - 2 * inner_pad
-
-    def pt(svg_x: float, svg_y: float) -> Foundation.NSPoint:
-        nx = (svg_x - 3.0) / 19.0
-        ny = 1.0 - ((svg_y - 3.0) / 18.0)
-        return Foundation.NSMakePoint(
-            inner_pad + nx * inner_span,
-            inner_pad + ny * inner_span,
-        )
-
-    AppKit.NSColor.whiteColor().setStroke()
-    stroke_w = size * 0.058
-
-    # 1. Play-Dreieck: polygon points="5 3, 19 12, 5 21"
-    play_path = AppKit.NSBezierPath.bezierPath()
-    play_path.setLineWidth_(stroke_w)
-    play_path.setLineCapStyle_(AppKit.NSLineCapStyleRound)
-    play_path.setLineJoinStyle_(AppKit.NSLineJoinStyleRound)
-    play_path.moveToPoint_(pt(5, 3))
-    play_path.lineToPoint_(pt(18.5, 11.5))
-    play_path.lineToPoint_(pt(5, 20))
-    play_path.closePath()
-    play_path.stroke()
-
-    # Kleiner blauer Freiraum rechts unten für den Download-Pfeil, damit er sich klar abhebt
-    badge_center = pt(19, 18)
-    badge_r = size * 0.145
-    badge_rect = Foundation.NSMakeRect(
-        badge_center.x - badge_r,
-        badge_center.y - badge_r,
-        badge_r * 2,
-        badge_r * 2,
-    )
-    badge_bg = AppKit.NSBezierPath.bezierPathWithOvalInRect_(badge_rect)
-    bottom_color.setFill()
-    badge_bg.fill()
-
-    # 2. Download-Pfeil: line (19,14)->(19,21) + polyline (15.5,17.8)->(19,21.2)->(22.5,17.8)
-    AppKit.NSColor.whiteColor().setStroke()
-    arrow_path = AppKit.NSBezierPath.bezierPath()
-    arrow_path.setLineWidth_(stroke_w * 0.92)
-    arrow_path.setLineCapStyle_(AppKit.NSLineCapStyleRound)
-    arrow_path.setLineJoinStyle_(AppKit.NSLineJoinStyleRound)
-    arrow_path.moveToPoint_(pt(19, 13.8))
-    arrow_path.lineToPoint_(pt(19, 21.0))
-    arrow_path.moveToPoint_(pt(15.6, 17.8))
-    arrow_path.lineToPoint_(pt(19, 21.2))
-    arrow_path.lineToPoint_(pt(22.4, 17.8))
-    arrow_path.stroke()
-
-    img.unlockFocus()
-    return img
+    with open(plist_path, "wb") as fp:
+        plistlib.dump(data, fp)
 
 
-def save_nsimage_as_png(img: AppKit.NSImage, out_path: Path, pixel_size: int) -> None:
-    rep = AppKit.NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
-        None,
-        pixel_size,
-        pixel_size,
-        8,
-        4,
-        True,
-        False,
-        AppKit.NSCalibratedRGBColorSpace,
-        0,
-        0,
-    )
-    rep.setSize_(Foundation.NSMakeSize(pixel_size, pixel_size))
+def _apply_finder_icon(target_path: Path, icon_png: Path) -> None:
+    """Setzt das Icon zusätzlich im macOS Finder-Cache (falls AppKit verfügbar ist)."""
+    try:
+        import AppKit
 
-    AppKit.NSGraphicsContext.saveGraphicsState()
-    ctx = AppKit.NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep)
-    AppKit.NSGraphicsContext.setCurrentContext_(ctx)
-    ctx.setShouldAntialias_(True)
-    ctx.setImageInterpolation_(AppKit.NSImageInterpolationHigh)
-    img.drawInRect_fromRect_operation_fraction_(
-        Foundation.NSMakeRect(0, 0, pixel_size, pixel_size),
-        Foundation.NSZeroRect,
-        AppKit.NSCompositingOperationSourceOver,
-        1.0,
-    )
-    AppKit.NSGraphicsContext.restoreGraphicsState()
-
-    png_data = rep.representationUsingType_properties_(
-        AppKit.NSBitmapImageFileTypePNG, {}
-    )
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    png_data.writeToFile_atomically_(str(out_path), True)
+        ws = AppKit.NSWorkspace.sharedWorkspace()
+        ns_img = AppKit.NSImage.alloc().initWithContentsOfFile_(str(icon_png))
+        if ns_img and target_path.exists():
+            ws.setIcon_forFile_options_(ns_img, str(target_path), 0)
+    except Exception:
+        pass
 
 
-def create_icns_and_assets(resources_dir: Path) -> AppKit.NSImage:
-    ns_img = render_vidow_icon_nsimage(1024)
+def create_dmg(app_bundle: Path, dmg_path: Path) -> None:
+    """Erzeugt ein komprimiertes, auslieferbares macOS .dmg mit ViDow.app & /Applications-Link."""
+    if dmg_path.exists():
+        dmg_path.unlink()
+    dmg_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Speichere hochauflösendes PNG auch unter static/icon.png (für das Laufzeit-Dock-Icon)
-    save_nsimage_as_png(ns_img, STATIC_DIR / "icon.png", 512)
-
-    # Speichere echte PNG-Größen für die Browser-Erweiterung
-    EXT_ICONS_DIR.mkdir(parents=True, exist_ok=True)
-    for ext_sz in (16, 48, 128):
-        save_nsimage_as_png(ns_img, EXT_ICONS_DIR / f"icon-{ext_sz}.png", ext_sz)
-
-    with tempfile.TemporaryDirectory() as tmp:
-        iconset = Path(tmp) / "AppIcon.iconset"
-        iconset.mkdir()
-
-        for s in (16, 32, 128, 256, 512):
-            save_nsimage_as_png(ns_img, iconset / f"icon_{s}x{s}.png", s)
-            save_nsimage_as_png(ns_img, iconset / f"icon_{s}x{s}@2x.png", s * 2)
-
-        icns_out = resources_dir / "AppIcon.icns"
+    with tempfile.TemporaryDirectory(prefix="vidow_dmg_") as staging_str:
+        staging = Path(staging_str)
+        staged_app = staging / "ViDow.app"
         subprocess.run(
-            ["iconutil", "-c", "icns", str(iconset), "-o", str(icns_out)],
+            ["ditto", "--norsrc", "--noextattr", str(app_bundle), str(staged_app)],
+            check=True,
+        )
+        os.symlink("/Applications", staging / "Applications")
+
+        subprocess.run(
+            [
+                "hdiutil",
+                "create",
+                "-volname",
+                "ViDow",
+                "-srcfolder",
+                str(staging),
+                "-ov",
+                "-format",
+                "UDZO",
+                str(dmg_path),
+            ],
             check=True,
         )
 
-    return ns_img
 
-
-def build_app() -> None:
-    contents_dir = APP_BUNDLE / "Contents"
+def build_dev_wrapper(icns_path: Path) -> None:
+    """Schneller lokaler Entwicklungs-Wrapper (nutzt .venv direkt im Projektordner)."""
+    contents_dir = ROOT_APP_BUNDLE / "Contents"
     macos_dir = contents_dir / "MacOS"
     resources_dir = contents_dir / "Resources"
 
-    if APP_BUNDLE.exists():
-        shutil.rmtree(APP_BUNDLE)
+    if ROOT_APP_BUNDLE.exists():
+        shutil.rmtree(ROOT_APP_BUNDLE)
 
     macos_dir.mkdir(parents=True, exist_ok=True)
     resources_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(icns_path, resources_dir / "AppIcon.icns")
 
-    info_plist = {
-        "CFBundleName": "ViDow",
-        "CFBundleDisplayName": "ViDow",
-        "CFBundleIdentifier": "de.lucasgoedel.vidow",
-        "CFBundleVersion": "1.1.0",
-        "CFBundleShortVersionString": "1.1.0",
-        "CFBundlePackageType": "APPL",
-        "CFBundleExecutable": "ViDow",
-        "CFBundleIconFile": "AppIcon.icns",
-        "LSMinimumSystemVersion": "11.0",
-        "NSHighResolutionCapable": True,
-    }
-    with open(contents_dir / "Info.plist", "wb") as fp:
-        plistlib.dump(info_plist, fp)
+    _patch_info_plist(ROOT_APP_BUNDLE)
+    plist_path = contents_dir / "Info.plist"
+    with open(plist_path, "rb") as fp:
+        pl = plistlib.load(fp)
+    pl["CFBundleExecutable"] = "ViDow"
+    with open(plist_path, "wb") as fp:
+        plistlib.dump(pl, fp)
 
     launcher_script = f"""#!/bin/bash
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -217,20 +141,138 @@ exec "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/app.py" >> /tmp/vidow.log 2>&
     executable_path.chmod(
         executable_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
     )
+    _apply_finder_icon(ROOT_APP_BUNDLE, STATIC_DIR / "icon.png")
+    print(f"✅ Lokaler Dev-Wrapper erstellt: {ROOT_APP_BUNDLE}")
 
-    ns_img = create_icns_and_assets(resources_dir)
 
-    # Setze das Icon direkt im macOS Finder (NSWorkspace) für ViDow.app & ViDow.command,
-    # damit der Finder das Icon sofort ohne Cache-Verzögerung anzeigt!
-    ws = AppKit.NSWorkspace.sharedWorkspace()
-    ws.setIcon_forFile_options_(ns_img, str(APP_BUNDLE), 0)
+def build_standalone(skip_dmg: bool = False) -> None:
+    """Baut die eigenständige, auslieferbare ViDow.app + ViDow-<version>-macOS.dmg."""
+    if sys.platform != "darwin":
+        print("Dieses Build-Skript ist für macOS gedacht.")
+        sys.exit(1)
+
+    print("=" * 64)
+    print(f"🎬 ViDow v{APP_VERSION} — Native macOS Standalone-App & DMG Build")
+    print("=" * 64)
+
+    # 1. Alle Icons frisch rendern
+    icns_path = generate_all_icons()
+    print(f"🎨 Icons generiert: {icns_path}")
+
+    # 2. PyInstaller prüfen
+    try:
+        import PyInstaller  # noqa: F401
+    except ImportError:
+        print("⬇️ Installiere PyInstaller & Build-Abhängigkeiten...")
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "pyinstaller", "pillow", "imageio-ffmpeg"],
+            check=True,
+        )
+
+    # 3. Alte Artefakte bereinigen
+    dist_app = DIST_DIR / "ViDow.app"
+    for p in (dist_app, DIST_DIR / "ViDow", BUILD_DIR):
+        if p.exists():
+            shutil.rmtree(p)
+
+    # 4. PyInstaller ausführen
+    cmd = [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--noconfirm",
+        "--clean",
+        "--onedir",
+        "--windowed",
+        "--name",
+        "ViDow",
+        "--osx-bundle-identifier",
+        BUNDLE_ID,
+        "--icon",
+        str(icns_path),
+        "--add-data",
+        f"{STATIC_DIR}:static",
+        "--collect-all",
+        "yt_dlp",
+        "--collect-all",
+        "curl_cffi",
+        "--collect-all",
+        "webview",
+        "--collect-all",
+        "imageio_ffmpeg",
+        str(BASE_DIR / "app.py"),
+    ]
+    print("\n📦 Kompiliere eigenständiges macOS App-Bundle (PyInstaller)...")
+    subprocess.run(cmd, check=True)
+
+    if not dist_app.is_dir():
+        raise RuntimeError(f"Erwartetes App-Bundle wurde nicht erzeugt: {dist_app}")
+
+    # Sicherstellen, dass AppIcon.icns unter Contents/Resources/AppIcon.icns liegt
+    res_icns = dist_app / "Contents" / "Resources" / "AppIcon.icns"
+    shutil.copy2(icns_path, res_icns)
+    _patch_info_plist(dist_app)
+
+    # 5. Finder-Metadaten/Resource-Forks entfernen & Ad-hoc Codesigning (--strict kompatibel!)
+    print("🔏 Bereinige Extended Attributes & signiere ViDow.app (ad-hoc codesign)...")
+    subprocess.run(["xattr", "-cr", str(dist_app)], check=False)
+    subprocess.run(
+        ["codesign", "--force", "--deep", "--sign", "-", str(dist_app)],
+        check=True,
+    )
+    subprocess.run(
+        ["codesign", "--verify", "--deep", "--strict", str(dist_app)],
+        check=True,
+    )
+
+    # 6. Auch ./ViDow.app im Projektstamm aktualisieren (per ditto --norsrc --noextattr)
+    if ROOT_APP_BUNDLE.exists():
+        shutil.rmtree(ROOT_APP_BUNDLE)
+    subprocess.run(
+        ["ditto", "--norsrc", "--noextattr", str(dist_app), str(ROOT_APP_BUNDLE)],
+        check=True,
+    )
+
     cmd_file = BASE_DIR / "ViDow.command"
     if cmd_file.exists():
-        ws.setIcon_forFile_options_(ns_img, str(cmd_file), 0)
+        _apply_finder_icon(cmd_file, STATIC_DIR / "icon.png")
 
-    subprocess.run(["touch", str(APP_BUNDLE)], check=False)
-    print(f"✅ ViDow.app & Icons erfolgreich erstellt: {APP_BUNDLE}")
+    # 7. Auslieferbares .dmg Installer-Image bauen (aus dem strikt signierten dist/ViDow.app)
+    dmg_path = DIST_DIR / f"ViDow-{APP_VERSION}-macOS.dmg"
+    if not skip_dmg:
+        print(f"💿 Erzeuge auslieferbares Disk-Image: {dmg_path.name}...")
+        create_dmg(dist_app, dmg_path)
+
+    print("\n" + "=" * 64)
+    print("✅ Native macOS-App erfolgreich gebaut!")
+    print(f"🍏 Standalone App:  {dist_app}")
+    print(f"🍏 Projekt-Kopie:   {ROOT_APP_BUNDLE}")
+    if not skip_dmg and dmg_path.is_file():
+        size_mb = dmg_path.stat().st_size / (1024 * 1024)
+        print(f"💿 Installer-DMG:   {dmg_path} ({size_mb:.1f} MB)")
+    print("=" * 64)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="ViDow macOS App & DMG Builder")
+    parser.add_argument(
+        "--dev-wrapper",
+        action="store_true",
+        help="Erzeugt nur einen schlanken .venv-Starter statt eines eigenständigen Bundles.",
+    )
+    parser.add_argument(
+        "--no-dmg",
+        action="store_true",
+        help="Überspringt die Erstellung der .dmg-Datei.",
+    )
+    args = parser.parse_args()
+
+    if args.dev_wrapper:
+        icns = generate_all_icons()
+        build_dev_wrapper(icns)
+    else:
+        build_standalone(skip_dmg=args.no_dmg)
 
 
 if __name__ == "__main__":
-    build_app()
+    main()
