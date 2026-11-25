@@ -85,6 +85,8 @@ function syncThemeControls() {
   updateSystemThemeHint();
 }
 
+const themePopoverEl = document.getElementById("theme-popover");
+
 for (const radio of document.querySelectorAll('input[name="theme_mode"]')) {
   radio.addEventListener("change", () => {
     const val = radio.value;
@@ -98,6 +100,11 @@ for (const radio of document.querySelectorAll('input[name="theme_mode"]')) {
         localStorage.setItem("color-scheme", val);
       }
     } catch {}
+    if (themePopoverEl) {
+      try {
+        themePopoverEl.hidePopover();
+      } catch {}
+    }
   });
 }
 

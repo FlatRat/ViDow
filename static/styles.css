@@ -348,24 +348,7 @@
     border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
   }
 
-  /* Theme Popover */
-  .theme-menu {
-    margin: 0;
-    inset: auto 1.5rem auto auto;
-    top: 3.6rem;
-    min-width: 225px;
-    padding: 0.75rem;
-    border-radius: 13px;
-    border: 1px solid var(--border-strong);
-    background: var(--surface);
-    color: var(--text);
-    box-shadow: var(--shadow-card);
-  }
-
-  .theme-menu:where(:popover-open, .\:popover-open) {
-    display: block;
-  }
-
+  /* Theme Popover inner items */
   .theme-menu-title {
     margin: 0 0 0.45rem;
     font-size: 0.75rem;
@@ -1300,7 +1283,7 @@
     }
   }
 
-  /* Popover Manual Toast Notifications */
+  /* Popover Manual Toast Stack Container */
   .toast-stack {
     position: fixed;
     bottom: 1.25rem;
@@ -1311,35 +1294,60 @@
     gap: 0.5rem;
     pointer-events: none;
   }
+}
 
-  .toast-popover {
-    position: static;
-    margin: 0;
-    padding: 0.68rem 0.95rem;
-    border-radius: 11px;
-    border: 1px solid var(--border-strong);
-    background: var(--surface);
-    color: var(--text);
-    box-shadow: var(--shadow-card);
-    font-size: 0.85rem;
-    display: none;
-    align-items: center;
-    gap: 0.75rem;
-    pointer-events: auto;
-    transition: opacity 0.2s ease, transform 0.2s ease, display 0.2s ease allow-discrete;
-  }
+/* Unlayered Top-Layer [popover] Overrides:
+   In WebKit/WKWebView übersteuern die nativen UA-[popover]-Regeln (margin: auto; inset: 0; border: solid)
+   deklarierte @layer-Regeln. Deshalb stehen Positionierung, Rahmen und Hintergrund für Popovers
+   bewusst außerhalb von @layer und außerhalb des backdrop-filter-Headers. */
+#theme-popover.theme-menu {
+  position: fixed;
+  inset: 3.65rem max(1.5rem, calc((100vw - 1360px) / 2 + 1.5rem)) auto auto;
+  margin: 0;
+  min-width: 235px;
+  padding: 0.8rem;
+  border-radius: 14px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-card);
+  outline: none;
+  display: none;
+}
 
-  [popover].toast-popover:where(:popover-open, .\:popover-open) {
-    display: flex;
-  }
+#theme-popover.theme-menu:where(:popover-open, .\:popover-open) {
+  display: block;
+}
 
-  .toast-popover.toast-error {
-    border-color: var(--danger);
-  }
+[popover].toast-popover {
+  position: static;
+  inset: auto;
+  margin: 0;
+  padding: 0.68rem 0.95rem;
+  border-radius: 11px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-card);
+  outline: none;
+  font-size: 0.85rem;
+  display: none;
+  align-items: center;
+  gap: 0.75rem;
+  pointer-events: auto;
+  transition: opacity 0.2s ease, transform 0.2s ease, display 0.2s ease allow-discrete;
+}
 
-  .toast-popover.toast-fallback {
-    display: flex;
-  }
+[popover].toast-popover:where(:popover-open, .\:popover-open) {
+  display: flex;
+}
+
+[popover].toast-popover.toast-error {
+  border-color: var(--danger);
+}
+
+.toast-popover.toast-fallback {
+  display: flex;
 }
 
 @layer utilities {

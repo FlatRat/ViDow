@@ -55,6 +55,7 @@
 
         <button
           type="button"
+          id="btn-theme"
           class="btn btn-icon"
           popovertarget="theme-popover"
           aria-label="Darstellung &amp; Design wählen"
@@ -66,24 +67,6 @@
           </svg>
           <span class="btn-icon-label">Design</span>
         </button>
-
-        <div id="theme-popover" popover="auto" class="theme-menu" role="region" aria-label="Farbschema">
-          <p class="theme-menu-title">Darstellung</p>
-          <div class="theme-options" role="radiogroup" aria-label="Farbschema auswählen">
-            <label class="theme-choice">
-              <input type="radio" name="theme_mode" value="light dark" checked>
-              <span>Systemstandard <small id="system-theme-hint"></small></span>
-            </label>
-            <label class="theme-choice">
-              <input type="radio" name="theme_mode" value="light">
-              <span>Hell (Light)</span>
-            </label>
-            <label class="theme-choice">
-              <input type="radio" name="theme_mode" value="dark">
-              <span>Dunkel (Studio Dark)</span>
-            </label>
-          </div>
-        </div>
       </div>
     </div>
   </header>
@@ -399,6 +382,25 @@
       </aside>
     </div>
   </main>
+
+  <!-- Darstellungs-Popover außerhalb der Top-Bar (verhindert backdrop-filter Containing-Block-Clipping) -->
+  <div id="theme-popover" popover="auto" class="theme-menu" role="region" aria-label="Farbschema">
+    <p class="theme-menu-title">Darstellung</p>
+    <div class="theme-options" role="radiogroup" aria-label="Farbschema auswählen">
+      <label class="theme-choice">
+        <input type="radio" name="theme_mode" value="light dark" checked>
+        <span>Systemstandard <small id="system-theme-hint"></small></span>
+      </label>
+      <label class="theme-choice">
+        <input type="radio" name="theme_mode" value="light">
+        <span>Hell (Light)</span>
+      </label>
+      <label class="theme-choice">
+        <input type="radio" name="theme_mode" value="dark">
+        <span>Dunkel (Studio Dark)</span>
+      </label>
+    </div>
+  </div>
 
   <!-- Toast-Container mit Popover API (manual) -->
   <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
