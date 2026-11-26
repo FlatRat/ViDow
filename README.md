@@ -38,24 +38,27 @@ Erzeugt:
 - `dist/ViDow.app` (signiertes Standalone-App-Bundle, auch nach `./ViDow.app` synchronisiert)
 - `dist/ViDow-2.0.0-macOS.dmg` (versandfertiges Disk-Image mit `/Applications`-Verknüpfung)
 
-### 🪟 Windows: Eigenständige `ViDow.exe` & Release-`.zip` erzeugen
+### 🪟 Windows: Nativen `Setup.exe`-Installer & Download-`.zip` erzeugen
 ```powershell
+winget install JRSoftware.InnoSetup
 python -m pip install -r requirements.txt pyinstaller
 python build_windows_exe.py
 ```
 Erzeugt:
-- `dist/ViDow/ViDow.exe` (eigenständige Windows-Anwendung ohne Konsolenfenster)
-- `dist/ViDow-2.0.0-Windows-x64.zip` (versandfertiges Komplettpaket inkl. Browser-Helper)
+- `dist/ViDow-2.0.0-Windows-Setup.exe` (nativer Windows-10/11-Installer mit Startmenü-/Desktop-Eintrag, Deinstallationsroutine & integriertem `ffmpeg` – funktioniert ohne Admin-Zwang)
+- `dist/ViDow-2.0.0-Windows-Setup.zip` (fertiges Download-Paket mit `Setup.exe`, Kurzanleitung & Browser-Helper)
 
 ### ☁️ Automatische GitHub-Releases (CI/CD)
 Über [`.github/workflows/release.yml`](.github/workflows/release.yml) baut GitHub Actions automatisch sowohl das **macOS-`.dmg`** als auch das **Windows-`.zip`** – entweder manuell per *Workflow Dispatch* oder automatisch beim Pushen eines Versions-Tags (z. B. `git tag v2.0.0 && git push origin v2.0.0`).
 
 ---
 
-## 🛠️ Lokaler Entwicklungsstart (ohne Kompilierung)
+## 🛠️ Lokaler Start (ohne Kompilierung)
 
+- **Windows:**
+  - Doppelklick auf `ViDow-NoConsole.vbs` (startet lautlos im nativen Desktop-Fenster und richtet `.venv` beim ersten Start automatisch ein) oder `ViDow.bat`
+  - Optional Desktop- & Startmenü-Verknüpfung anlegen: `python create_windows_shortcut.py`
 - **macOS:** `./ViDow.command` (oder `python3 build_mac_app.py --dev-wrapper`)
-- **Windows:** Doppelklick auf `ViDow.bat` oder lautlos via `ViDow-NoConsole.vbs`
 
 ---
 

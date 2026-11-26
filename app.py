@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ViDow — Lokaler Video-Downloader & Stream-Sniffer (Backend)
-Unterstützt Qualitäts-/Codec-Auswahl, freie Speicherortwahl (inkl. macOS Finder-Dialog),
+ViDow — Lokaler Video-Downloader & Stream-Sniffer (Backend für Windows & macOS)
+Unterstützt Qualitäts-/Codec-Auswahl, freie Speicherortwahl (nativer Windows-Explorer- & macOS-Finder-Dialog),
 automatische Pre-Roll-Werbe-Filterung, SponsorBlock-Zuschnitt und Browser-Extension-Anbindung.
 """
 
@@ -30,6 +30,51 @@ from yt_dlp.utils import DownloadError
 
 APP_VERSION = "2.0.0"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
+WINDOW_TITLE = "ViDow — Studio Video Downloader"
+WIN_NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
+_WIN_ICON_HANDLES: list[int] = []
+
+
+def get_windows_known_folder(folder_guid: str, fallback: Path) -> Path:
+    """Liest unter Windows den echten Systempfad (z. B. Downloads, Videos, Desktop inkl. OneDrive/Laufwerksumleitung)."""
+    if sys.platform != "win32":
+        return fallback
+    try:
+        import ctypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        guid = _GUID.from_buffer_copy(uuid.UUID(folder_guid).bytes_le)
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+        shell32.SHGetKnownFolderPath.argtypes = [
+            ctypes.POINTER(_GUID),
+            ctypes.c_ulong,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+        ole32.CoTaskMemFree.restype = None
+
+        path_ptr = ctypes.c_void_p()
+        hr = shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(path_ptr))
+        if hr == 0 and path_ptr.value:
+            try:
+                resolved = ctypes.wstring_at(path_ptr.value)
+                if resolved:
+                    return Path(os.path.normpath(resolved))
+            finally:
+                ole32.CoTaskMemFree(path_ptr)
+    except Exception:
+        pass
+    return fallback
 
 
 def get_user_config_dir() -> Path:
@@ -174,7 +219,50 @@ def find_ffmpeg() -> tuple[str | None, bool]:
 
 
 FFMPEG_PATH, FFMPEG_BUNDLED = find_ffmpeg()
-DEFAULT_OUTPUT_DIR = str(Path.home() / "Downloads" / "ViDow")
+if sys.platform == "win32":
+    DOWNLOADS_DIR = get_windows_known_folder(
+        "{374DE290-123F-4565-9164-39C4925E467B}", Path.home() / "Downloads"
+    )
+    VIDEOS_DIR = get_windows_known_folder(
+        "{18989B1D-99B5-455B-841C-AB7C74E4DDFC}", Path.home() / "Videos"
+    )
+elif sys.platform == "darwin":
+    DOWNLOADS_DIR = Path.home() / "Downloads"
+    VIDEOS_DIR = Path.home() / "Movies"
+else:
+    DOWNLOADS_DIR = Path.home() / "Downloads"
+    VIDEOS_DIR = Path.home() / "Videos"
+
+DEFAULT_OUTPUT_DIR = str(DOWNLOADS_DIR / "ViDow")
+
+_WIN_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def sanitize_windows_title(raw_name: str, max_chars: int = 140) -> str:
+    """Bereinigt Dateinamen plattformsicher (inkl. Windows-Sonderzeichen, Endpunkten & Gerätenamen)."""
+    safe = yt_dlp.utils.sanitize_filename(str(raw_name or ""), restricted=False)
+    if sys.platform == "win32":
+        safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", safe)
+        safe = safe.strip().rstrip(". ")
+        stem_upper = safe.split(".", 1)[0].strip().upper()
+        if stem_upper in _WIN_RESERVED_NAMES:
+            safe = f"_{safe}"
+    else:
+        safe = safe.strip()
+    return safe[:max_chars].strip().rstrip(". " if sys.platform == "win32" else " ") or "Video"
+
+
+def compute_safe_title_bytes(output_dir: str, default_bytes: int = 170) -> int:
+    """Begrenzt unter Windows die Titellänge dynamisch, damit MAX_PATH (260 Zeichen) inkl. Temp-Suffixen nie gesprengt wird."""
+    if sys.platform != "win32":
+        return default_bytes
+    # Reserve ~60 Zeichen für '\' + ' [id]' + ' [1920x1080]' + '.f137.webm.part'
+    budget = 240 - len(os.path.normpath(output_dir)) - 60
+    return max(40, min(default_bytes, budget))
 
 
 def get_missing_volume_name(path: Path) -> str | None:
@@ -249,13 +337,12 @@ def resolve_usable_output_dir(
 
 def load_settings() -> dict[str, Any]:
     default_dir = DEFAULT_OUTPUT_DIR
-    video_dir_name = "Videos" if sys.platform == "win32" else "Movies"
     defaults: dict[str, Any] = {
         "output_dir": default_dir,
         "recent_dirs": [
             default_dir,
-            str(Path.home() / "Downloads"),
-            str(Path.home() / video_dir_name),
+            str(DOWNLOADS_DIR),
+            str(VIDEOS_DIR),
         ],
         "quality": "best",
         "codec": "auto",
@@ -278,6 +365,20 @@ def load_settings() -> dict[str, Any]:
             defaults.update(saved)
         except Exception:
             pass
+
+    if sys.platform == "win32":
+        if defaults.get("cookies_browser") == "safari":
+            defaults["cookies_browser"] = "none"
+        if defaults.get("output_dir"):
+            defaults["output_dir"] = os.path.normpath(str(Path(str(defaults["output_dir"])).expanduser()))
+        if isinstance(defaults.get("recent_dirs"), list):
+            norm_recent: list[str] = []
+            for d in defaults["recent_dirs"]:
+                if isinstance(d, str) and d.strip():
+                    nd = os.path.normpath(str(Path(d).expanduser()))
+                    if nd not in norm_recent:
+                        norm_recent.append(nd)
+            defaults["recent_dirs"] = norm_recent or [default_dir, str(DOWNLOADS_DIR), str(VIDEOS_DIR)]
     return defaults
 
 
@@ -287,6 +388,8 @@ def save_settings(new_data: dict[str, Any]) -> dict[str, Any]:
     out_dir = current.get("output_dir", "").strip()
     if out_dir:
         expanded = str(Path(out_dir).expanduser())
+        if sys.platform == "win32":
+            expanded = os.path.normpath(expanded)
         current["output_dir"] = expanded
         recent = [expanded] + [
             d for d in current.get("recent_dirs", []) if d != expanded
@@ -452,20 +555,30 @@ def apply_impersonate_and_cookies(
                 ed_dir = home / "Library/Application Support/Microsoft Edge"
                 valid_cookie_store = ed_dir.exists() and any(ed_dir.glob("*/Cookies"))
         elif sys.platform == "win32":
-            local_app_data = Path(os.environ.get("LOCALAPPDATA", str(home / "AppData/Local")))
-            app_data = Path(os.environ.get("APPDATA", str(home / "AppData/Roaming")))
-            if cookies_browser == "firefox":
-                ff_dir = app_data / "Mozilla/Firefox/Profiles"
-                valid_cookie_store = ff_dir.exists() and any(ff_dir.glob("*/cookies.sqlite"))
-            elif cookies_browser == "chrome":
-                ch_dir = local_app_data / "Google/Chrome/User Data"
-                valid_cookie_store = ch_dir.exists()
-            elif cookies_browser == "brave":
-                br_dir = local_app_data / "BraveSoftware/Brave-Browser/User Data"
-                valid_cookie_store = br_dir.exists()
-            elif cookies_browser == "edge":
-                ed_dir = local_app_data / "Microsoft/Edge/User Data"
-                valid_cookie_store = ed_dir.exists()
+            if cookies_browser == "safari":
+                valid_cookie_store = False
+            else:
+                local_app_data = Path(os.environ.get("LOCALAPPDATA", str(home / "AppData/Local")))
+                app_data = Path(os.environ.get("APPDATA", str(home / "AppData/Roaming")))
+                if cookies_browser == "firefox":
+                    ff_dir = app_data / "Mozilla/Firefox/Profiles"
+                    valid_cookie_store = ff_dir.exists() and any(ff_dir.glob("*/cookies.sqlite"))
+                elif cookies_browser == "chrome":
+                    ch_dir = local_app_data / "Google/Chrome/User Data"
+                    valid_cookie_store = ch_dir.exists()
+                elif cookies_browser == "brave":
+                    br_dir = local_app_data / "BraveSoftware/Brave-Browser/User Data"
+                    valid_cookie_store = br_dir.exists()
+                elif cookies_browser == "edge":
+                    ed_dir = local_app_data / "Microsoft/Edge/User Data"
+                    valid_cookie_store = ed_dir.exists()
+                elif cookies_browser == "opera":
+                    op_dir = app_data / "Opera Software/Opera Stable"
+                    op_gx_dir = app_data / "Opera Software/Opera GX Stable"
+                    valid_cookie_store = op_dir.exists() or op_gx_dir.exists()
+                elif cookies_browser == "vivaldi":
+                    vv_dir = local_app_data / "Vivaldi/User Data"
+                    valid_cookie_store = vv_dir.exists()
 
         if valid_cookie_store:
             ydl_opts["cookiesfrombrowser"] = (cookies_browser,)
@@ -866,16 +979,19 @@ def download_fallback_stream(
     stream_url = select_fallback_stream_url(fallback_info, fb_opts)
     raw_outtmpl = fb_opts.get("outtmpl")
     if isinstance(raw_outtmpl, str) and "%(title)" in raw_outtmpl:
-        safe_title = yt_dlp.utils.sanitize_filename(
-            str(fallback_info.get("title") or "Video"), restricted=False
-        )[:150].strip() or "Video"
+        out_dir = os.path.dirname(raw_outtmpl)
+        max_title_len = compute_safe_title_bytes(out_dir, 140)
+        safe_title = sanitize_windows_title(
+            str(fallback_info.get("title") or "Video"), max_chars=max_title_len
+        )
         safe_id = yt_dlp.utils.sanitize_filename(
             str(fallback_info.get("id") or "stream"), restricted=True
         )[:40] or "stream"
-        out_dir = os.path.dirname(raw_outtmpl)
         has_res_token = "%(resolution" in raw_outtmpl
         suffix = "%(resolution& [{}]|)s.%(ext)s" if has_res_token else ".%(ext)s"
         fb_opts["outtmpl"] = os.path.join(out_dir, f"{safe_title} [{safe_id}]{suffix}")
+    if sys.platform == "win32":
+        fb_opts["windowsfilenames"] = True
 
     if fallback_info.get("direct_formats") and fallback_info.get("formats") and not fallback_info.get("master_url"):
         try:
@@ -969,10 +1085,13 @@ def extract_info_with_fallback(
         first_err = re.sub(r"\x1b\[[0-9;]*m", "", str(first_exc))
 
         # Automatischer Fallback, falls Browser-Cookies (z.B. Firefox/Chrome) nicht gefunden oder unter Windows gesperrt sind
+        cookie_lock_failed = False
+        requested_cookie_browser = (ydl_opts.get("cookiesfrombrowser") or (None,))[0]
         if any(
             kw in first_err.lower()
-            for kw in ("cookies", "operation not permitted", "permission denied", "could not copy", "dpapi")
+            for kw in ("cookies", "operation not permitted", "permission denied", "could not copy", "dpapi", "app-bound")
         ):
+            cookie_lock_failed = True
             clean_opts = dict(ydl_opts)
             clean_opts.pop("cookiesfrombrowser", None)
             save_settings({"cookies_browser": "none"})
@@ -1053,10 +1172,16 @@ def extract_info_with_fallback(
                 last_html,
                 re.IGNORECASE,
             ):
+                win_cookie_hint = (
+                    " (Unter Windows am besten Mozilla Firefox wählen oder den Browser vor dem Download kurz schließen, "
+                    "da Chrome/Edge ihre Cookie-Datenbank im Betrieb per App-Bound-Encryption sperren.)"
+                    if sys.platform == "win32"
+                    else ""
+                )
                 raise ValueError(
                     "Dieses Video ist auf der Webseite als privat oder passwortgeschützt markiert "
                     "(deshalb enthält die Seite keine öffentlichen Player-Daten/'flashvars'). "
-                    "Tipp: Falls du im Browser Zugriff hast, wähle in ViDow unter 'Browser-Cookies' deinen Browser aus."
+                    f"Tipp: Falls du im Browser Zugriff hast, wähle in ViDow unter 'Browser-Cookies' deinen Browser aus.{win_cookie_hint}"
                 ) from first_exc
 
             if last_status == 410 or re.search(
@@ -1067,6 +1192,13 @@ def extract_info_with_fallback(
                 raise ValueError(
                     "Das Video existiert auf dem Server nicht mehr (vom Anbieter gelöscht oder deaktiviert)."
                 ) from first_exc
+
+        if cookie_lock_failed and sys.platform == "win32" and requested_cookie_browser in {"chrome", "edge", "brave", "opera", "vivaldi"}:
+            raise ValueError(
+                f"{first_err} — Hinweis für Windows: {str(requested_cookie_browser).capitalize()} sperrt/verschlüsselt "
+                "Cookies im laufenden Betrieb (App-Bound Encryption). Bitte nutze für Login-Videos Mozilla Firefox "
+                "oder unsere Browser-Erweiterung ('extension/')."
+            ) from first_exc
 
         raise first_exc
 
@@ -1088,6 +1220,8 @@ def analyze_url(payload: dict[str, Any]) -> dict[str, Any]:
     }
     if FFMPEG_PATH:
         ydl_opts["ffmpeg_location"] = FFMPEG_PATH
+    if sys.platform == "win32":
+        ydl_opts["windowsfilenames"] = True
     apply_impersonate_and_cookies(ydl_opts, cookies_browser, custom_headers)
 
     info = extract_info_with_fallback(ydl_opts, url, download=False, custom_headers=custom_headers)
@@ -1181,7 +1315,6 @@ def analyze_url(payload: dict[str, Any]) -> dict[str, Any]:
                 "direct_url": entry.get("url") or entry.get("webpage_url") or url,
                 "thumbnail": entry.get("thumbnail"),
                 "duration": entry.get("duration"),
-                "duration_ formatted": format_seconds(entry.get("duration")),
                 "duration_formatted": format_seconds(entry.get("duration")),
                 "uploader": entry.get("uploader") or entry.get("channel") or info.get("extractor_key") or "",
                 "extractor": entry.get("extractor_key") or info.get("extractor_key") or "Generic",
@@ -1328,8 +1461,10 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
     format_selector = build_format_selector(quality, codec, container, audio_format)
     format_sort = build_format_sort(quality, codec, container)
 
+    title_bytes_video = compute_safe_title_bytes(output_dir, 170)
+    title_bytes_audio = compute_safe_title_bytes(output_dir, 180)
     if custom_title:
-        safe_custom = yt_dlp.utils.sanitize_filename(custom_title, restricted=False).strip() or "Video"
+        safe_custom = sanitize_windows_title(custom_title, max_chars=title_bytes_video)
         target_ext = audio_format if quality == "audio" else container
         existing_same_name = os.path.exists(os.path.join(output_dir, f"{safe_custom}.{target_ext}"))
         if quality != "audio" and existing_same_name:
@@ -1337,9 +1472,9 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
         else:
             out_name = f"{safe_custom}.%(ext)s"
     elif quality == "audio":
-        out_name = "%(title).180B [%(id)s].%(ext)s"
+        out_name = f"%(title).{title_bytes_audio}B [%(id)s].%(ext)s"
     else:
-        out_name = "%(title).170B [%(id)s]%(resolution& [{}]|)s.%(ext)s"
+        out_name = f"%(title).{title_bytes_video}B [%(id)s]%(resolution& [{{}}]|)s.%(ext)s"
 
     outtmpl = os.path.join(output_dir, out_name)
 
@@ -1414,6 +1549,10 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
 
     if FFMPEG_PATH:
         ydl_opts["ffmpeg_location"] = FFMPEG_PATH
+
+    if sys.platform == "win32":
+        ydl_opts["windowsfilenames"] = True
+        ydl_opts["trim_file_name"] = compute_safe_title_bytes(output_dir, 180)
 
     apply_impersonate_and_cookies(ydl_opts, cookies_browser, custom_headers)
 
@@ -1516,11 +1655,85 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
 
 
 ACTIVE_WINDOW: Any = None
+CURRENT_THEME_MODE: str = "light dark"
 
 
 def pick_folder_dialog(initial_dir: str = "") -> str | None:
-    """Öffnet einen nativen Ordnerauswahl-Dialog (pywebview -> OS-spezifischer Fallback)."""
-    # 1. Wenn pywebview-Fenster aktiv ist
+    """Öffnet einen nativen Ordnerauswahl-Dialog (unter Windows moderner Explorer-Dialog, unter macOS Finder)."""
+    start_dir = initial_dir or str(DOWNLOADS_DIR)
+    if sys.platform == "win32":
+        norm_start = os.path.normpath(start_dir)
+        if not os.path.isdir(norm_start):
+            norm_start = str(DOWNLOADS_DIR)
+
+        # 1. Unter Windows zuerst Tkinter (nutzt in Tcl/Tk 8.6 den modernen Windows-11-IFileOpenDialog
+        #    mit Schnellzugriff, Adressleiste & OneDrive statt des veralteten WinForms-Baumdialogs)
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            icon_ico = STATIC_DIR / "icon.ico"
+            if icon_ico.is_file():
+                try:
+                    root.iconbitmap(default=str(icon_ico))
+                except Exception:
+                    pass
+            chosen = filedialog.askdirectory(
+                parent=root,
+                initialdir=norm_start,
+                mustexist=False,
+                title="ViDow — Zielordner für Downloads auswählen",
+            )
+            root.destroy()
+            if chosen:
+                return os.path.normpath(str(chosen).rstrip("/\\"))
+            return None
+        except Exception:
+            pass
+
+        # 2. Fallback auf pywebview-Dialog
+        if ACTIVE_WINDOW is not None:
+            try:
+                import webview
+
+                folder_enum = getattr(webview, "FileDialog", None)
+                dialog_type = folder_enum.FOLDER if folder_enum else webview.FOLDER_DIALOG
+                res = ACTIVE_WINDOW.create_file_dialog(dialog_type, directory=norm_start)
+                if res and len(res) > 0:
+                    return os.path.normpath(str(res[0]).rstrip("/\\"))
+                return None
+            except Exception:
+                pass
+
+        # 3. Fallback auf verstecktes STA-PowerShell (ohne Konsolen-Aufblitzen & ohne Quote-Injection)
+        try:
+            ps_env = os.environ.copy()
+            ps_env["VIDOW_INIT_DIR"] = norm_start
+            ps_script = (
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                "$f.SelectedPath = $env:VIDOW_INIT_DIR; "
+                "$f.Description = 'ViDow: Zielordner auswählen'; "
+                "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }"
+            )
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Sta", "-Command", ps_script],
+                env=ps_env,
+                capture_output=True,
+                text=True,
+                timeout=90,
+                creationflags=WIN_NO_WINDOW,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                return os.path.normpath(proc.stdout.strip().splitlines()[-1].strip().rstrip("/\\"))
+        except Exception:
+            pass
+        return None
+
+    # Nicht-Windows: 1. pywebview-Dialog (z. B. macOS NSOpenPanel / GTK)
     if ACTIVE_WINDOW is not None:
         try:
             import webview
@@ -1529,7 +1742,7 @@ def pick_folder_dialog(initial_dir: str = "") -> str | None:
             dialog_type = folder_enum.FOLDER if folder_enum else webview.FOLDER_DIALOG
             res = ACTIVE_WINDOW.create_file_dialog(
                 dialog_type,
-                directory=initial_dir or str(Path.home() / "Downloads"),
+                directory=start_dir,
             )
             if res and len(res) > 0:
                 return str(res[0]).rstrip("/\\")
@@ -1537,46 +1750,8 @@ def pick_folder_dialog(initial_dir: str = "") -> str | None:
         except Exception:
             pass
 
-    # 2. Windows Fallback (Tkinter oder PowerShell)
-    if sys.platform == "win32":
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            chosen = filedialog.askdirectory(
-                initialdir=initial_dir or str(Path.home() / "Downloads"),
-                title="ViDow: Zielordner für Downloads auswählen",
-            )
-            root.destroy()
-            if chosen:
-                return str(chosen).rstrip("/\\")
-        except Exception:
-            pass
-
-        try:
-            ps_script = (
-                "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; "
-                "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
-                f"$f.SelectedPath = '{initial_dir}'; "
-                "$f.Description = 'ViDow: Zielordner auswählen'; "
-                "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }"
-            )
-            proc = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_script],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if proc.returncode == 0 and proc.stdout.strip():
-                return proc.stdout.strip().splitlines()[-1].strip().rstrip("/\\")
-        except Exception:
-            pass
-
-    # 3. macOS Fallback (osascript / Finder)
-    elif sys.platform == "darwin":
+    # 2. macOS Fallback (osascript / Finder)
+    if sys.platform == "darwin":
         try:
             script = (
                 'POSIX path of (choose folder with prompt '
@@ -1593,7 +1768,7 @@ def pick_folder_dialog(initial_dir: str = "") -> str | None:
         except Exception:
             pass
 
-    # 4. Linux Fallback (zenity / kdialog)
+    # 3. Linux Fallback (zenity / kdialog)
     else:
         for cmd in [
             ["zenity", "--file-selection", "--directory", "--title=ViDow: Zielordner"],
@@ -1609,20 +1784,64 @@ def pick_folder_dialog(initial_dir: str = "") -> str | None:
     return None
 
 
-def get_system_clipboard() -> str:
-    """Liest Text aus der System-Zwischenablage (Windows, macOS, Linux)."""
-    if sys.platform == "win32":
+def _read_win32_clipboard_text() -> str | None:
+    """Liest Unicode-Text direkt über die native Win32-API (<1ms, ohne PowerShell-Prozess oder Aufblitzen)."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        cf_unicodetext = 13
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+        user32.OpenClipboard.restype = ctypes.c_int
+        user32.CloseClipboard.argtypes = []
+        user32.CloseClipboard.restype = ctypes.c_int
+        user32.IsClipboardFormatAvailable.argtypes = [ctypes.c_uint]
+        user32.IsClipboardFormatAvailable.restype = ctypes.c_int
+        user32.GetClipboardData.argtypes = [ctypes.c_uint]
+        user32.GetClipboardData.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalUnlock.restype = ctypes.c_int
+
+        opened = False
+        for _ in range(5):
+            if user32.OpenClipboard(None):
+                opened = True
+                break
+            time.sleep(0.015)
+        if not opened:
+            return None
+
         try:
-            proc = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", "Get-Clipboard"],
-                capture_output=True,
-                text=True,
-                timeout=3,
-            )
-            if proc.returncode == 0:
-                return proc.stdout.strip()
-        except Exception:
-            pass
+            if not user32.IsClipboardFormatAvailable(cf_unicodetext):
+                return ""
+            handle = user32.GetClipboardData(cf_unicodetext)
+            if not handle:
+                return ""
+            ptr = kernel32.GlobalLock(handle)
+            if not ptr:
+                return ""
+            try:
+                return ctypes.wstring_at(ptr).strip()
+            finally:
+                kernel32.GlobalUnlock(handle)
+        finally:
+            user32.CloseClipboard()
+    except Exception:
+        return None
+
+
+def get_system_clipboard() -> str:
+    """Liest Text aus der System-Zwischenablage (Windows nativ via Win32, macOS, Linux)."""
+    if sys.platform == "win32":
+        win_text = _read_win32_clipboard_text()
+        if win_text is not None:
+            return win_text
 
         try:
             import tkinter as tk
@@ -1632,6 +1851,19 @@ def get_system_clipboard() -> str:
             text = root.clipboard_get()
             root.destroy()
             return str(text).strip()
+        except Exception:
+            pass
+
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Sta", "-Command", "Get-Clipboard"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                creationflags=WIN_NO_WINDOW,
+            )
+            if proc.returncode == 0:
+                return proc.stdout.strip()
         except Exception:
             pass
         return ""
@@ -1657,7 +1889,7 @@ def get_system_clipboard() -> str:
 
 
 def reveal_in_file_manager(target_path: Path) -> None:
-    """Öffnet den Pfad im nativen Dateimanager (Windows Explorer, macOS Finder, Linux)."""
+    """Öffnet den Pfad im nativen Dateimanager (Windows Explorer per Shell-API, macOS Finder, Linux)."""
     expanded = target_path.expanduser()
     if not expanded.is_file():
         resolved_dir, _ = resolve_usable_output_dir(
@@ -1669,9 +1901,45 @@ def reveal_in_file_manager(target_path: Path) -> None:
 
     if sys.platform == "win32":
         target_str = os.path.normpath(str(target_path))
+        if target_str.startswith("\\\\?\\") and len(target_str) < 260:
+            target_str = target_str[4:]
+
         if target_path.is_file():
-            # Öffnet Windows Explorer und markiert die Datei
-            subprocess.Popen(["explorer.exe", f"/select,{target_str}"])
+            # Nutze Win32 SHOpenFolderAndSelectItems (funktioniert zuverlässig auch bei Kommas,
+            # Leerzeichen, Klammern & Emojis im Videotitel und nutzt offene Explorer-Fenster wieder)
+            selected_ok = False
+            try:
+                import ctypes
+
+                shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+                ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+                ole32.CoInitialize.argtypes = [ctypes.c_void_p]
+                ole32.CoInitialize.restype = ctypes.c_long
+                shell32.ILCreateFromPathW.argtypes = [ctypes.c_wchar_p]
+                shell32.ILCreateFromPathW.restype = ctypes.c_void_p
+                shell32.SHOpenFolderAndSelectItems.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.c_uint,
+                    ctypes.c_void_p,
+                    ctypes.c_ulong,
+                ]
+                shell32.SHOpenFolderAndSelectItems.restype = ctypes.c_long
+                shell32.ILFree.argtypes = [ctypes.c_void_p]
+                shell32.ILFree.restype = None
+
+                ole32.CoInitialize(None)
+                pidl = shell32.ILCreateFromPathW(target_str)
+                if pidl:
+                    try:
+                        hr = shell32.SHOpenFolderAndSelectItems(pidl, 0, None, 0)
+                        selected_ok = hr == 0
+                    finally:
+                        shell32.ILFree(pidl)
+            except Exception:
+                selected_ok = False
+
+            if not selected_ok:
+                subprocess.Popen(f'explorer.exe /select,"{target_str}"')
         else:
             os.startfile(target_str)
     elif sys.platform == "darwin":
@@ -1687,17 +1955,241 @@ def reveal_in_file_manager(target_path: Path) -> None:
             subprocess.Popen(["xdg-open", str(target_path)])
 
 
-def setup_windows_app_id() -> None:
-    """Setzt unter Windows die AppUserModelID für sauberes Taskleisten-Icon & Gruppierung."""
-    if sys.platform == "win32":
-        try:
-            import ctypes
+def setup_windows_environment() -> None:
+    """Aktiviert unter Windows High-DPI (PerMonitorV2) und setzt die AppUserModelID für Taskleiste & Gruppierung."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
 
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "FlatRat.ViDow.VideoDownloader.1.0"
-            )
+        # 1. Per-Monitor High-DPI v2 (-4) für gestochen scharfe Darstellung auf 125%/150%/4K-Monitoren
+        try:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_ssize_t]
+            user32.SetProcessDpiAwarenessContext.restype = ctypes.c_int
+            if not user32.SetProcessDpiAwarenessContext(-4):
+                ctypes.WinDLL("shcore", use_last_error=True).SetProcessDpiAwareness(2)
+        except Exception:
+            try:
+                ctypes.WinDLL("user32", use_last_error=True).SetProcessDPIAware()
+            except Exception:
+                pass
+
+        # 2. Eindeutige AppUserModelID für sauberes Taskleisten-Pinning & eigenes App-Icon
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        shell32.SetCurrentProcessExplicitAppUserModelID.argtypes = [ctypes.c_wchar_p]
+        shell32.SetCurrentProcessExplicitAppUserModelID.restype = ctypes.c_long
+        shell32.SetCurrentProcessExplicitAppUserModelID("FlatRat.ViDow.Studio.2.0")
+    except Exception:
+        pass
+
+
+def is_windows_dark_mode() -> bool:
+    """Prüft in der Windows-Registry, ob das App-Design auf Dunkel steht."""
+    if sys.platform != "win32":
+        return True
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        ) as key:
+            val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return int(val) == 0
+    except Exception:
+        return True
+
+
+def _find_process_main_hwnd() -> int:
+    """Ermittelt das Hauptfenster-Handle (HWND) dieses ViDow-Prozesses unter Windows."""
+    if sys.platform != "win32":
+        return 0
+    try:
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+        user32.FindWindowW.restype = ctypes.c_void_p
+        user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        user32.GetWindowThreadProcessId.restype = ctypes.c_ulong
+        user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+        user32.IsWindowVisible.restype = ctypes.c_int
+
+        my_pid = os.getpid()
+        hwnd = user32.FindWindowW(None, WINDOW_TITLE)
+        if hwnd:
+            pid = ctypes.c_ulong(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == my_pid:
+                return int(hwnd)
+
+        found_hwnd = 0
+        enum_proc_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+
+        def _cb(h: int, _lparam: int) -> int:
+            nonlocal found_hwnd
+            if h and user32.IsWindowVisible(h):
+                pid = ctypes.c_ulong(0)
+                user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+                if pid.value == my_pid:
+                    found_hwnd = int(h)
+                    return 0
+            return 1
+
+        user32.EnumWindows.argtypes = [enum_proc_type, ctypes.c_void_p]
+        user32.EnumWindows.restype = ctypes.c_int
+        user32.EnumWindows(enum_proc_type(_cb), None)
+        return found_hwnd
+    except Exception:
+        return 0
+
+
+def apply_windows_window_styling(theme_mode: str | None = None) -> bool:
+    """
+    Setzt unter Windows 10/11:
+    1. Native dunkle/helle Titelleiste passend zum gewählten Design (DWMWA_USE_IMMERSIVE_DARK_MODE)
+    2. Sanft gerundete Windows-11-Fensterecken (DWMWA_WINDOW_CORNER_PREFERENCE)
+    3. Das hochauflösende ViDow-.ico-Icon in Titelleiste, Taskleiste & Alt+Tab (WM_SETICON)
+    """
+    global CURRENT_THEME_MODE
+    if theme_mode is not None:
+        CURRENT_THEME_MODE = theme_mode
+    if sys.platform != "win32":
+        return False
+
+    hwnd = _find_process_main_hwnd()
+    if not hwnd:
+        return False
+
+    try:
+        import ctypes
+
+        dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        dwmapi.DwmSetWindowAttribute.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+        ]
+        dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+
+        if CURRENT_THEME_MODE == "dark":
+            use_dark = 1
+        elif CURRENT_THEME_MODE == "light":
+            use_dark = 0
+        else:
+            use_dark = 1 if is_windows_dark_mode() else 0
+
+        dark_val = ctypes.c_int(use_dark)
+        if dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark_val), ctypes.sizeof(dark_val)) != 0:
+            dwmapi.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(dark_val), ctypes.sizeof(dark_val))
+
+        # Windows 11 gerundete Ecken (DWMWCP_ROUND = 2)
+        corner_val = ctypes.c_int(2)
+        dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(corner_val), ctypes.sizeof(corner_val))
+
+        # Fenster- & Taskleisten-Icon aus static/icon.ico setzen (wichtig für Python/.venv-Starts)
+        icon_ico = STATIC_DIR / "icon.ico"
+        if icon_ico.is_file() and not _WIN_ICON_HANDLES:
+            user32.LoadImageW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_wchar_p,
+                ctypes.c_uint,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_uint,
+            ]
+            user32.LoadImageW.restype = ctypes.c_void_p
+            user32.SendMessageW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_uint,
+                ctypes.c_size_t,
+                ctypes.c_void_p,
+            ]
+            user32.SendMessageW.restype = ctypes.c_ssize_t
+
+            h_small = user32.LoadImageW(None, str(icon_ico), 1, 16, 16, 0x00000010)
+            h_big = user32.LoadImageW(None, str(icon_ico), 1, 48, 48, 0x00000010)
+            if h_small:
+                _WIN_ICON_HANDLES.append(int(h_small))
+                user32.SendMessageW(hwnd, 0x0080, 0, h_small)
+            if h_big:
+                _WIN_ICON_HANDLES.append(int(h_big))
+                user32.SendMessageW(hwnd, 0x0080, 1, h_big)
+
+        # Titelleisten-Frame neu zeichnen
+        user32.SetWindowPos.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+        ]
+        user32.SetWindowPos.restype = ctypes.c_int
+        user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0027)
+        return True
+    except Exception:
+        return False
+
+
+def focus_local_window() -> bool:
+    """Holt das geöffnete ViDow-Fenster in den Vordergrund (z. B. bei erneutem App-Start)."""
+    if ACTIVE_WINDOW is not None:
+        try:
+            ACTIVE_WINDOW.restore()
+            ACTIVE_WINDOW.show()
         except Exception:
             pass
+    if sys.platform == "win32":
+        hwnd = _find_process_main_hwnd()
+        if hwnd:
+            try:
+                import ctypes
+
+                user32 = ctypes.WinDLL("user32", use_last_error=True)
+                user32.IsIconic.argtypes = [ctypes.c_void_p]
+                user32.IsIconic.restype = ctypes.c_int
+                user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+                user32.ShowWindow.restype = ctypes.c_int
+                user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+                user32.SetForegroundWindow.restype = ctypes.c_int
+                if user32.IsIconic(hwnd):
+                    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                user32.SetForegroundWindow(hwnd)
+                return True
+            except Exception:
+                pass
+    return ACTIVE_WINDOW is not None
+
+
+def try_focus_running_instance(port: int = DEFAULT_PORT) -> bool:
+    """Prüft beim Start, ob ViDow bereits auf dem Standard-Port läuft, und fokussiert das bestehende Fenster."""
+    import urllib.request
+
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/status", timeout=0.6) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            if not (isinstance(data, dict) and data.get("app") == "ViDow"):
+                return False
+        req = urllib.request.Request(
+            f"{base_url}/api/focus",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=0.8) as focus_resp:
+            focus_data = json.loads(focus_resp.read().decode("utf-8", errors="replace"))
+            if focus_data.get("focused"):
+                return True
+            webbrowser.open(base_url)
+            return True
+    except Exception:
+        return False
 
 
 class ViDowRequestHandler(BaseHTTPRequestHandler):
@@ -1757,7 +2249,14 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
                         if sys.platform == "darwin"
                         else "Linux"
                     ),
-                    "file_manager_label": "Explorer" if sys.platform == "win32" else "Finder",
+                    "file_manager_label": (
+                        "Explorer"
+                        if sys.platform == "win32"
+                        else "Finder"
+                        if sys.platform == "darwin"
+                        else "Dateimanager"
+                    ),
+                    "default_output_dir": DEFAULT_OUTPUT_DIR,
                     "yt_dlp_version": yt_dlp.version.__version__,
                     "ffmpeg_available": bool(FFMPEG_PATH),
                     "ffmpeg_bundled": FFMPEG_BUNDLED,
@@ -1783,8 +2282,9 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
             file_path = STATIC_DIR / "index.html"
         else:
             rel = route.lstrip("/")
-            file_path = (STATIC_DIR / rel).resolve()
-            if not str(file_path).startswith(str(STATIC_DIR.resolve())):
+            static_root = STATIC_DIR.resolve()
+            file_path = (static_root / rel).resolve()
+            if not file_path.is_relative_to(static_root):
                 self._send_json({"ok": False, "error": "Ungültiger Pfad"}, HTTPStatus.FORBIDDEN)
                 return
 
@@ -1822,6 +2322,17 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
         if route == "/api/settings":
             updated = save_settings(payload)
             self._send_json({"ok": True, "settings": updated})
+            return
+
+        if route == "/api/focus":
+            focused = focus_local_window()
+            self._send_json({"ok": True, "focused": focused})
+            return
+
+        if route == "/api/window-theme":
+            theme_val = str(payload.get("theme") or "light dark").strip()
+            applied = apply_windows_window_styling(theme_val)
+            self._send_json({"ok": True, "applied": applied})
             return
 
         if route == "/api/pick-folder":
@@ -1993,12 +2504,30 @@ def apply_macos_dock_icon() -> None:
         pass
 
 
+def _on_desktop_window_ready() -> None:
+    """Wird direkt nach dem Öffnen des nativen Fensters aufgerufen (setzt Icons & OS-Titelleiste)."""
+    if sys.platform == "darwin":
+        apply_macos_dock_icon()
+    elif sys.platform == "win32":
+        for _ in range(20):
+            if apply_windows_window_styling():
+                break
+            time.sleep(0.08)
+
+
 def main() -> None:
     global ACTIVE_WINDOW
     multiprocessing.freeze_support()
     if not IS_FROZEN:
         STATIC_DIR.mkdir(parents=True, exist_ok=True)
-    setup_windows_app_id()
+    setup_windows_environment()
+
+    use_browser_only = "--browser" in sys.argv or os.environ.get("VIDOW_BROWSER_ONLY") == "1"
+    if not use_browser_only and os.environ.get("VIDOW_ALLOW_MULTI") != "1":
+        if try_focus_running_instance(DEFAULT_PORT):
+            print("[ViDow] Bereits laufende ViDow-Instanz wurde in den Vordergrund geholt.")
+            return
+
     settings = load_settings()
     effective_output_dir, output_dir_warning = resolve_usable_output_dir(
         settings.get("output_dir"), fallback_on_unavailable=True
@@ -2023,8 +2552,7 @@ def main() -> None:
     print(f"🎞️  ffmpeg: {ffmpeg_status}")
     print("=" * 60)
 
-    use_browser_only = "--browser" in sys.argv or os.environ.get("VIDOW_BROWSER_ONLY") == "1"
-
+    server_in_bg_thread = False
     if not use_browser_only:
         try:
             import webview
@@ -2032,6 +2560,7 @@ def main() -> None:
             if server is not None:
                 srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
                 srv_thread.start()
+                server_in_bg_thread = True
 
             if sys.platform == "darwin":
                 apply_macos_dock_icon()
@@ -2043,7 +2572,7 @@ def main() -> None:
                 chosen_icon = None
 
             ACTIVE_WINDOW = webview.create_window(
-                "ViDow — Studio Video Downloader",
+                WINDOW_TITLE,
                 url,
                 width=1300,
                 height=860,
@@ -2051,9 +2580,7 @@ def main() -> None:
                 background_color="#0e0a19",
             )
 
-            start_kwargs: dict[str, Any] = {}
-            if sys.platform == "darwin":
-                start_kwargs["func"] = apply_macos_dock_icon
+            start_kwargs: dict[str, Any] = {"func": _on_desktop_window_ready}
             if chosen_icon:
                 start_kwargs["icon"] = chosen_icon
 
@@ -2063,6 +2590,7 @@ def main() -> None:
                 server.server_close()
             return
         except Exception as exc:
+            ACTIVE_WINDOW = None
             print(f"[ViDow] Hinweis: Konnte natives Desktop-Fenster nicht starten ({exc}), öffne im Browser…")
 
     if os.environ.get("VIDOW_NO_BROWSER") != "1":
@@ -2070,9 +2598,14 @@ def main() -> None:
 
     if server is not None:
         try:
-            server.serve_forever()
+            if server_in_bg_thread:
+                threading.Event().wait()
+            else:
+                server.serve_forever()
         except KeyboardInterrupt:
             print("\n[ViDow] Server wird beendet…")
+            if server_in_bg_thread:
+                server.shutdown()
             server.server_close()
 
 

@@ -53,14 +53,16 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
-      - name: Build ViDow.exe & Release ZIP
+      - name: Build ViDow Setup.exe & Download ZIP
         run: python build_windows_exe.py
 
-      - name: Upload Windows ZIP artifact
+      - name: Upload Windows Setup & ZIP artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ViDow-Windows-x64-ZIP
-          path: dist/*.zip
+          name: ViDow-Windows-Setup
+          path: |
+            dist/*Setup.exe
+            dist/*.zip
 
   publish-release:
     name: Publish GitHub Release

@@ -18,6 +18,7 @@ und das Projekt folgt [Semantic Versioning](https://semver.org/lang/de/).
 - **Neues Studio-App-Icon (`generate_icons.py`):** Hochauflösender plattformübergreifender 2048px-Supersampling-Generator für `AppIcon.icns`, `icon.ico`, `icon.png`, `icon.svg` und die Browser-Extension-Icons (`16px`, `48px`, `128px`).
 
 ### 🛠️ Behoben & Verbessert
+- **Vollständige Windows-10/11-Integration:** Native DWM-Titelleiste (automatisch Dunkel/Hell synchron zur App & gerundete Windows-11-Ecken), Per-Monitor-High-DPI-Schärfe, Single-Instance-Fensterfokus, sofortige Win32-Zwischenablage ohne Konsolen-Aufblitzen (`CREATE_NO_WINDOW`), moderner Windows-Explorer-Ordnerdialog, präzise Dateimarkierung per `SHOpenFolderAndSelectItems`, OneDrive-kompatible Systemordner (`SHGetKnownFolderPath`), `MAX_PATH`-sichere Windows-Dateinamen sowie randoptimiertes `.ico`-Icon und Startmenü-/Desktop-Verknüpfungen.
 - **OS-konformer Einstellungs- & Log-Pfad:** Speichert `settings.json` und Windowed-Logs nun im nativen Benutzerverzeichnis (`~/Library/Application Support/ViDow` bzw. `%APPDATA%\ViDow`), sodass schreibgeschützte Installationen unter `/Applications` oder `Program Files` fehlerfrei funktionieren.
 - **Hochkantvideos & Multi-Qualitäts-Downloads:** Orientierungsunabhängige Qualitätsstufen (`res:<Stufe>` inkl. `540p`/`240p`), KVS-/Iframe-/HTML5-Stream-Fallbacks und auflösungsbasierte Dateinamen.
 

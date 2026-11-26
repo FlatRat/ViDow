@@ -339,18 +339,23 @@ def generate_all_icons(extra_icns_path: Path | None = None) -> Path:
         svg_path.unlink()
     svg_path.write_text(SVG_ICON, encoding="utf-8")
 
-    # 2. Windows Multi-Size .ico
+    # 2. Windows Multi-Size .ico (reduzierter Außenrand gegenüber macOS HIG,
+    #    damit das Icon in Windows-Taskleiste, Titelleiste & Explorer in voller Fluent-Größe erscheint)
+    win_crop_margin = int(round(1024 * 0.066))  # 68px -> ~93% Canvas-Füllung inkl. sanftem Schatten
+    win_master = master_1024.crop(
+        (win_crop_margin, win_crop_margin, 1024 - win_crop_margin, 1024 - win_crop_margin)
+    ).resize((1024, 1024), Image.Resampling.LANCZOS)
     ico_path = STATIC_DIR / "icon.ico"
     _safe_save_img(
-        master_1024,
+        win_master,
         ico_path,
         format="ICO",
         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
     )
 
-    # 3. Chrome / Brave / Edge Extension Icons (exakte Pixelgrößen)
+    # 3. Chrome / Brave / Edge Extension Icons (exakte Pixelgrößen, ebenfalls randoptimiert)
     for ext_sz in (16, 48, 128):
-        resized = master_1024.resize((ext_sz, ext_sz), Image.Resampling.LANCZOS)
+        resized = win_master.resize((ext_sz, ext_sz), Image.Resampling.LANCZOS)
         _safe_save_img(resized, EXT_ICONS_DIR / f"icon-{ext_sz}.png", format="PNG")
 
     # 4. macOS AppIcon.icns (falls auf macOS und iconutil verfügbar)

@@ -196,7 +196,7 @@
                   <option value="mp4">MP4 (Universell abspielbar)</option>
                   <option value="mkv">MKV (Ideal für alle Codecs)</option>
                   <option value="webm">WebM</option>
-                  <option value="mov">MOV (Apple QuickTime)</option>
+                  <option value="mov">MOV (Studio / QuickTime)</option>
                 </select>
               </div>
 
@@ -204,7 +204,7 @@
                 <label for="audio-format-select">Audio-Codec / Format</label>
                 <select id="audio-format-select" name="audio_format" class="ui-select">
                   <option value="mp3">MP3 (320 kbit/s – Universell)</option>
-                  <option value="m4a">M4A / AAC (Apple Music / iOS)</option>
+                  <option value="m4a">M4A / AAC (Streaming &amp; Mobil)</option>
                   <option value="flac">FLAC (Verlustfrei / Lossless)</option>
                   <option value="wav">WAV (Studio Unkomprimiert)</option>
                   <option value="opus">Opus (Höchste Effizienz)</option>
@@ -225,7 +225,7 @@
             <div class="section-head">
               <h2 class="section-title">Zielordner &amp; Dateiname</h2>
               <button type="button" id="btn-open-folder" class="btn btn-ghost btn-sm" title="Aktuellen Zielordner öffnen">
-                Im Finder zeigen
+                Im Explorer zeigen
               </button>
             </div>
 
@@ -234,7 +234,7 @@
                 type="text"
                 id="output-dir"
                 name="output_dir"
-                placeholder="~/Downloads/ViDow"
+                placeholder="Downloads\ViDow"
                 autocorrect="off"
                 autocapitalize="off"
                 spellcheck="false"
@@ -309,11 +309,13 @@
                 <label for="cookies-browser-select">Browser-Session / Cookies übernehmen (für Login &amp; Altersfreigabe)</label>
                 <select id="cookies-browser-select" name="cookies_browser" class="ui-select">
                   <option value="none">Keine Cookies (Standard)</option>
-                  <option value="chrome">Google Chrome</option>
-                  <option value="safari">Apple Safari</option>
-                  <option value="firefox">Mozilla Firefox</option>
-                  <option value="brave">Brave Browser</option>
+                  <option value="firefox">Mozilla Firefox (Empfohlen unter Windows)</option>
                   <option value="edge">Microsoft Edge</option>
+                  <option value="chrome">Google Chrome</option>
+                  <option value="brave">Brave Browser</option>
+                  <option value="opera">Opera / Opera GX</option>
+                  <option value="vivaldi">Vivaldi</option>
+                  <option value="safari" id="cookie-opt-safari">Apple Safari</option>
                 </select>
               </div>
             </div>

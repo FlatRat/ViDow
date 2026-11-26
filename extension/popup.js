@@ -1,6 +1,7 @@
 // ViDow Browser-Helper — Popup Logic (Manifest V3, async/await only)
 
-const VIDOW_SERVER = "http://127.0.0.1:8765";
+const CANDIDATE_SERVERS = ["http://127.0.0.1:8765", "http://127.0.0.1:8766", "http://127.0.0.1:8767"];
+let activeServerUrl = CANDIDATE_SERVERS[0];
 
 const statusEl = document.getElementById("server-status");
 const tabTitleEl = document.getElementById("tab-title");
@@ -22,21 +23,23 @@ function setFeedback(text, isError = false) {
 }
 
 async function checkViDowServer() {
-  try {
-    const res = await fetch(`${VIDOW_SERVER}/api/status`);
-    const data = await res.json();
-    if (data.ok) {
-      statusEl.textContent = "Verbunden";
-      statusEl.style.color = "var(--success)";
-      serverSettings = data.settings || {};
-      if (serverSettings.quality) qualityEl.value = serverSettings.quality;
-      if (serverSettings.codec) codecEl.value = serverSettings.codec;
-      return true;
-    }
-  } catch (err) {
-    statusEl.textContent = "Server offline";
-    statusEl.style.color = "var(--danger)";
+  for (const candidate of CANDIDATE_SERVERS) {
+    try {
+      const res = await fetch(`${candidate}/api/status`);
+      const data = await res.json();
+      if (data.ok && data.app === "ViDow") {
+        activeServerUrl = candidate;
+        statusEl.textContent = "Verbunden";
+        statusEl.style.color = "var(--success)";
+        serverSettings = data.settings || {};
+        if (serverSettings.quality) qualityEl.value = serverSettings.quality;
+        if (serverSettings.codec) codecEl.value = serverSettings.codec;
+        return true;
+      }
+    } catch {}
   }
+  statusEl.textContent = "App offline";
+  statusEl.style.color = "var(--danger)";
   return false;
 }
 
@@ -49,11 +52,11 @@ async function sendToViDow(targetUrl, title) {
       quality: qualityEl.value,
       codec: codecEl.value,
       container: "mp4",
-      output_dir: serverSettings.output_dir || "~/Downloads/ViDow",
+      output_dir: serverSettings.output_dir || "",
       skip_preroll_ads: true,
       headers: activeTab?.url ? { Referer: activeTab.url } : {},
     };
-    const res = await fetch(`${VIDOW_SERVER}/api/download`, {
+    const res = await fetch(`${activeServerUrl}/api/download`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -65,7 +68,7 @@ async function sendToViDow(targetUrl, title) {
       setFeedback(data.error || "Fehler beim Starten.", true);
     }
   } catch (err) {
-    setFeedback("ViDow-Server nicht erreichbar (Starte ViDow.command).", true);
+    setFeedback("ViDow Studio ist nicht erreichbar – bitte starte die ViDow-App.", true);
   }
 }
 
@@ -230,8 +233,8 @@ btnSkipAd.addEventListener("click", async () => {
 
 btnOpenDashboard.addEventListener("click", async () => {
   const target = activeTab?.url
-    ? `${VIDOW_SERVER}/?url=${encodeURIComponent(activeTab.url)}`
-    : VIDOW_SERVER;
+    ? `${activeServerUrl}/?url=${encodeURIComponent(activeTab.url)}`
+    : activeServerUrl;
   await chrome.tabs.create({ url: target });
 });
 

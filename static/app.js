@@ -70,6 +70,14 @@ function updateSystemThemeHint() {
   }
 }
 
+function syncNativeWindowTheme(themeValue) {
+  fetch("/api/window-theme", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ theme: themeValue }),
+  }).catch(() => {});
+}
+
 function syncThemeControls() {
   let stored = null;
   try {
@@ -83,6 +91,7 @@ function syncThemeControls() {
     radio.checked = radio.value === activeVal;
   }
   updateSystemThemeHint();
+  syncNativeWindowTheme(activeVal);
 }
 
 const themePopoverEl = document.getElementById("theme-popover");
@@ -100,6 +109,7 @@ for (const radio of document.querySelectorAll('input[name="theme_mode"]')) {
         localStorage.setItem("color-scheme", val);
       }
     } catch {}
+    syncNativeWindowTheme(val);
     if (themePopoverEl) {
       try {
         themePopoverEl.hidePopover();
@@ -108,7 +118,12 @@ for (const radio of document.querySelectorAll('input[name="theme_mode"]')) {
   });
 }
 
-darkMediaQuery.addEventListener("change", updateSystemThemeHint);
+darkMediaQuery.addEventListener("change", () => {
+  updateSystemThemeHint();
+  if (!colorSchemeMeta || colorSchemeMeta.content === "light dark") {
+    syncNativeWindowTheme("light dark");
+  }
+});
 window.addEventListener("storage", (e) => {
   if (e.key === "color-scheme") {
     syncThemeControls();
@@ -378,6 +393,22 @@ async function initStatus() {
     if (els.btnOpenFolder) {
       els.btnOpenFolder.textContent = `Im ${window.vidowFileManagerLabel} zeigen`;
       els.btnOpenFolder.title = `Aktuellen Zielordner im ${window.vidowFileManagerLabel} öffnen`;
+    }
+    if (data.default_output_dir && els.outputDirInput) {
+      els.outputDirInput.placeholder = data.default_output_dir;
+    }
+    if (data.platform !== "darwin") {
+      const safariOpt = document.getElementById("cookie-opt-safari");
+      if (safariOpt) safariOpt.remove();
+    } else {
+      const ffOpt = els.cookiesBrowserSelect?.querySelector('option[value="firefox"]');
+      if (ffOpt) ffOpt.textContent = "Mozilla Firefox";
+    }
+    if (els.btnPaste) {
+      els.btnPaste.title =
+        data.platform === "darwin"
+          ? "URL aus Zwischenablage einfügen (⌘V)"
+          : "URL aus Zwischenablage einfügen (Strg+V)";
     }
 
     const s = data.settings || {};
