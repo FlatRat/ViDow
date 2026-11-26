@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -77,22 +78,59 @@ def get_windows_known_folder(folder_guid: str, fallback: Path) -> Path:
     return fallback
 
 
+def _safe_exists(path: Path) -> bool:
+    """Prüft Path.exists() absturzsicher (fängt unter Python 3.12+ PermissionError/WinError 5 ab)."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def _safe_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _safe_is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
 def get_user_config_dir() -> Path:
-    """Liefert das native, beschreibbare App-Datenverzeichnis des Betriebssystems."""
+    """
+    Liefert das native, beschreibbare App-Datenverzeichnis des Betriebssystems.
+    Weicht bei gesperrten System-/Firmenprofilen (z. B. gesperrtes %APPDATA% / WinError 5)
+    automatisch auf %LOCALAPPDATA% bzw. das temporäre Benutzerverzeichnis aus.
+    """
     home = Path.home()
+    candidates: list[Path] = []
     if sys.platform == "darwin":
-        cfg = home / "Library" / "Application Support" / "ViDow"
+        candidates.append(home / "Library" / "Application Support" / "ViDow")
     elif sys.platform == "win32":
         appdata = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
-        cfg = Path(appdata) / "ViDow"
+        local_appdata = os.environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
+        candidates.append(Path(appdata) / "ViDow")
+        candidates.append(Path(local_appdata) / "ViDow")
     else:
         xdg = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
-        cfg = Path(xdg) / "vidow"
-    try:
-        cfg.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    return cfg
+        candidates.append(Path(xdg) / "vidow")
+
+    candidates.append(Path(tempfile.gettempdir()) / "ViDow")
+
+    for cand in candidates:
+        try:
+            cand.mkdir(parents=True, exist_ok=True)
+            probe = cand / ".vidow_write_test"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return cand
+        except OSError:
+            continue
+    return candidates[-1]
 
 
 USER_CONFIG_DIR = get_user_config_dir()
@@ -159,12 +197,12 @@ def find_ffmpeg() -> tuple[str | None, bool]:
         BASE_DIR.parent / "Resources" / "ffmpeg",
     ]
     for cand in bundle_candidates:
-        if cand.is_file() and os.access(cand, os.X_OK):
+        if _safe_is_file(cand) and os.access(cand, os.X_OK):
             return str(cand), True
 
     # 2. Direkte Suche im System-PATH
     which_ffmpeg = shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
-    if which_ffmpeg and os.path.isfile(which_ffmpeg):
+    if which_ffmpeg and _safe_is_file(Path(which_ffmpeg)):
         return which_ffmpeg, False
 
     # 3. Typische Windows-Installationspfade (WinGet, Scoop, Chocolatey, Standard-Pfade)
@@ -176,10 +214,10 @@ def find_ffmpeg() -> tuple[str | None, bool]:
 
         if local_app_data:
             winget_dir = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
-            if winget_dir.is_dir():
+            if _safe_is_dir(winget_dir):
                 try:
                     for found in winget_dir.glob("**/ffmpeg.exe"):
-                        if found.is_file():
+                        if _safe_is_file(found):
                             return str(found), False
                 except Exception:
                     pass
@@ -191,7 +229,7 @@ def find_ffmpeg() -> tuple[str | None, bool]:
             Path(program_files) / "ffmpeg" / "bin" / "ffmpeg.exe",
             Path("C:/ffmpeg/bin/ffmpeg.exe"),
         ]:
-            if c.is_file():
+            if _safe_is_file(c):
                 return str(c), False
 
     # 4. Typische macOS Homebrew-Pfade
@@ -356,8 +394,8 @@ def load_settings() -> dict[str, Any]:
     }
     settings_source = (
         SETTINGS_FILE
-        if SETTINGS_FILE.exists()
-        else (LEGACY_SETTINGS_FILE if not IS_FROZEN and LEGACY_SETTINGS_FILE.exists() else None)
+        if _safe_is_file(SETTINGS_FILE)
+        else (LEGACY_SETTINGS_FILE if not IS_FROZEN and _safe_is_file(LEGACY_SETTINGS_FILE) else None)
     )
     if settings_source is not None:
         try:
@@ -541,56 +579,59 @@ def apply_impersonate_and_cookies(
     if cookies_browser and cookies_browser != "none":
         home = Path.home()
         valid_cookie_store = True
-        if sys.platform == "darwin":
-            if cookies_browser == "firefox":
-                ff_dir = home / "Library/Application Support/Firefox/Profiles"
-                valid_cookie_store = ff_dir.exists() and any(ff_dir.glob("*/cookies.sqlite"))
-            elif cookies_browser == "chrome":
-                ch_dir = home / "Library/Application Support/Google/Chrome"
-                valid_cookie_store = ch_dir.exists() and any(ch_dir.glob("*/Cookies"))
-            elif cookies_browser == "brave":
-                br_dir = home / "Library/Application Support/BraveSoftware/Brave-Browser"
-                valid_cookie_store = br_dir.exists() and any(br_dir.glob("*/Cookies"))
-            elif cookies_browser == "edge":
-                ed_dir = home / "Library/Application Support/Microsoft Edge"
-                valid_cookie_store = ed_dir.exists() and any(ed_dir.glob("*/Cookies"))
-            elif cookies_browser == "opera":
-                op_dir = home / "Library/Application Support/com.operasoftware.Opera"
-                op_gx_dir = home / "Library/Application Support/com.operasoftware.OperaGX"
-                valid_cookie_store = (
-                    (op_dir / "Cookies").exists()
-                    or (op_dir.exists() and any(op_dir.glob("*/Cookies")))
-                    or (op_gx_dir / "Cookies").exists()
-                    or (op_gx_dir.exists() and any(op_gx_dir.glob("*/Cookies")))
-                )
-            elif cookies_browser == "vivaldi":
-                vv_dir = home / "Library/Application Support/Vivaldi"
-                valid_cookie_store = vv_dir.exists() and any(vv_dir.glob("*/Cookies"))
-        elif sys.platform == "win32":
-            if cookies_browser == "safari":
-                valid_cookie_store = False
-            else:
-                local_app_data = Path(os.environ.get("LOCALAPPDATA", str(home / "AppData/Local")))
-                app_data = Path(os.environ.get("APPDATA", str(home / "AppData/Roaming")))
+        try:
+            if sys.platform == "darwin":
                 if cookies_browser == "firefox":
-                    ff_dir = app_data / "Mozilla/Firefox/Profiles"
-                    valid_cookie_store = ff_dir.exists() and any(ff_dir.glob("*/cookies.sqlite"))
+                    ff_dir = home / "Library/Application Support/Firefox/Profiles"
+                    valid_cookie_store = _safe_is_dir(ff_dir) and any(ff_dir.glob("*/cookies.sqlite"))
                 elif cookies_browser == "chrome":
-                    ch_dir = local_app_data / "Google/Chrome/User Data"
-                    valid_cookie_store = ch_dir.exists()
+                    ch_dir = home / "Library/Application Support/Google/Chrome"
+                    valid_cookie_store = _safe_is_dir(ch_dir) and any(ch_dir.glob("*/Cookies"))
                 elif cookies_browser == "brave":
-                    br_dir = local_app_data / "BraveSoftware/Brave-Browser/User Data"
-                    valid_cookie_store = br_dir.exists()
+                    br_dir = home / "Library/Application Support/BraveSoftware/Brave-Browser"
+                    valid_cookie_store = _safe_is_dir(br_dir) and any(br_dir.glob("*/Cookies"))
                 elif cookies_browser == "edge":
-                    ed_dir = local_app_data / "Microsoft/Edge/User Data"
-                    valid_cookie_store = ed_dir.exists()
+                    ed_dir = home / "Library/Application Support/Microsoft Edge"
+                    valid_cookie_store = _safe_is_dir(ed_dir) and any(ed_dir.glob("*/Cookies"))
                 elif cookies_browser == "opera":
-                    op_dir = app_data / "Opera Software/Opera Stable"
-                    op_gx_dir = app_data / "Opera Software/Opera GX Stable"
-                    valid_cookie_store = op_dir.exists() or op_gx_dir.exists()
+                    op_dir = home / "Library/Application Support/com.operasoftware.Opera"
+                    op_gx_dir = home / "Library/Application Support/com.operasoftware.OperaGX"
+                    valid_cookie_store = (
+                        _safe_is_file(op_dir / "Cookies")
+                        or (_safe_is_dir(op_dir) and any(op_dir.glob("*/Cookies")))
+                        or _safe_is_file(op_gx_dir / "Cookies")
+                        or (_safe_is_dir(op_gx_dir) and any(op_gx_dir.glob("*/Cookies")))
+                    )
                 elif cookies_browser == "vivaldi":
-                    vv_dir = local_app_data / "Vivaldi/User Data"
-                    valid_cookie_store = vv_dir.exists()
+                    vv_dir = home / "Library/Application Support/Vivaldi"
+                    valid_cookie_store = _safe_is_dir(vv_dir) and any(vv_dir.glob("*/Cookies"))
+            elif sys.platform == "win32":
+                if cookies_browser == "safari":
+                    valid_cookie_store = False
+                else:
+                    local_app_data = Path(os.environ.get("LOCALAPPDATA", str(home / "AppData/Local")))
+                    app_data = Path(os.environ.get("APPDATA", str(home / "AppData/Roaming")))
+                    if cookies_browser == "firefox":
+                        ff_dir = app_data / "Mozilla/Firefox/Profiles"
+                        valid_cookie_store = _safe_is_dir(ff_dir) and any(ff_dir.glob("*/cookies.sqlite"))
+                    elif cookies_browser == "chrome":
+                        ch_dir = local_app_data / "Google/Chrome/User Data"
+                        valid_cookie_store = _safe_is_dir(ch_dir)
+                    elif cookies_browser == "brave":
+                        br_dir = local_app_data / "BraveSoftware/Brave-Browser/User Data"
+                        valid_cookie_store = _safe_is_dir(br_dir)
+                    elif cookies_browser == "edge":
+                        ed_dir = local_app_data / "Microsoft/Edge/User Data"
+                        valid_cookie_store = _safe_is_dir(ed_dir)
+                    elif cookies_browser == "opera":
+                        op_dir = app_data / "Opera Software/Opera Stable"
+                        op_gx_dir = app_data / "Opera Software/Opera GX Stable"
+                        valid_cookie_store = _safe_is_dir(op_dir) or _safe_is_dir(op_gx_dir)
+                    elif cookies_browser == "vivaldi":
+                        vv_dir = local_app_data / "Vivaldi/User Data"
+                        valid_cookie_store = _safe_is_dir(vv_dir)
+        except OSError:
+            valid_cookie_store = False
 
         if valid_cookie_store:
             ydl_opts["cookiesfrombrowser"] = (cookies_browser,)
@@ -1903,7 +1944,7 @@ def get_system_clipboard() -> str:
 def reveal_in_file_manager(target_path: Path) -> None:
     """Öffnet den Pfad im nativen Dateimanager (Windows Explorer per Shell-API, macOS Finder, Linux)."""
     expanded = target_path.expanduser()
-    if not expanded.is_file():
+    if not _safe_is_file(expanded):
         resolved_dir, _ = resolve_usable_output_dir(
             str(expanded), fallback_on_unavailable=False
         )
@@ -2399,7 +2440,15 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
             if parsed_ext.scheme not in {"http", "https"} or not parsed_ext.netloc:
                 self._send_json({"ok": False, "error": "Ungültige externe URL."}, HTTPStatus.BAD_REQUEST)
                 return
-            opened = bool(webbrowser.open(ext_url))
+            opened = False
+            if sys.platform == "win32":
+                try:
+                    os.startfile(ext_url)
+                    opened = True
+                except Exception:
+                    opened = bool(webbrowser.open(ext_url))
+            else:
+                opened = bool(webbrowser.open(ext_url))
             self._send_json({"ok": True, "opened": opened})
             return
 

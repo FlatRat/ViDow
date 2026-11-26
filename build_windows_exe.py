@@ -328,10 +328,13 @@ def build(installer_only: bool = False) -> None:
     else:
         print(f"ℹ️ Nutze bereits gebautes Programmverzeichnis: {app_folder}")
 
-    # Alte Portable-ZIP entfernen, damit keine Verwechslung im dist-Ordner entsteht
+    # Alte Setup- & ZIP-Versionen im dist-Ordner aufräumen, damit keine alten Releases liegen bleiben
+    if DIST_DIR.is_dir():
+        for old_pkg in list(DIST_DIR.glob("ViDow-*-Windows-*.exe")) + list(
+            DIST_DIR.glob("ViDow-*-Windows-*.zip")
+        ):
+            old_pkg.unlink(missing_ok=True)
     legacy_portable_zip = DIST_DIR / f"ViDow-{APP_VERSION}-Windows-x64.zip"
-    if legacy_portable_zip.exists():
-        legacy_portable_zip.unlink()
 
     iscc_exe = find_iscc()
     setup_stem = f"ViDow-{APP_VERSION}-Windows-Setup"

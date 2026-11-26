@@ -1295,7 +1295,7 @@
     gap: 0.45rem;
     font-size: 0.76rem;
     letter-spacing: 0.01em;
-    color: var(--text-subtle);
+    color: var(--muted);
   }
 
   .footer-sep {
@@ -1303,7 +1303,7 @@
   }
 
   :where(.creator-link) {
-    color: var(--text-muted);
+    color: var(--text);
     font-weight: 560;
     text-decoration: underline solid color-mix(in srgb, currentColor, transparent) max(1px, 0.08em);
     text-underline-offset: 0.22em;
