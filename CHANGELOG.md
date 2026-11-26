@@ -10,7 +10,7 @@ und das Projekt folgt [Semantic Versioning](https://semver.org/lang/de/).
 ## [2.0.4] - 2026-11-26
 
 ### 🛠️ Behoben & Verbessert
-- **Garantierte MP4-/QuickTime- & Windows-Abspielbarkeit:** Bevorzugt bei `MP4`/`MOV` bis 1080p direkt natives `H.264 (avc1) + AAC` statt `AV1` und wandelt 2K/4K-Streams (`VP9`/`AV1`), `hev1`-HEVC-Tags sowie `Opus`-Audiospuren nach dem Download automatisch per `ffmpeg` (unter macOS mit Apple VideoToolbox Hardware-Beschleunigung + `libx264`/`libx265`-Fallback und Live-Fortschritt) in überall abspielbares MP4/MOV (`+faststart`) um.
+- **Garantierte MP4-/Windows- & QuickTime-Abspielbarkeit (mit GPU-Beschleunigung):** Bevorzugt bei `MP4`/`MOV` bis 1080p direkt natives `H.264 (avc1) + AAC` statt `AV1` und wandelt 2K/4K-Streams (`VP9`/`AV1`), `hev1`-HEVC-Tags sowie `Opus`-Audiospuren nach dem Download automatisch per `ffmpeg` (unter Windows per NVIDIA `NVENC`, AMD `AMF` oder Intel `QuickSync`, unter macOS per Apple `VideoToolbox`, jeweils mit `libx264`/`libx265`-Fallback, `WinError 32`-Schutz und Live-Fortschritt) in überall abspielbares MP4/MOV (`+faststart`) um.
 - **Sofortige Vorschau & Download bei YouTube-Musikvideos:** Überspringt automatisch angehängte YouTube-Mix-/Radio-Parameter (`&list=RD…` bzw. `&list=…` auf Einzelvideo-URLs) und lädt echte Playlist-Vorschauen flach (`extract_flat`), sodass Musikvideos in ~2 Sekunden statt nach Minuten geprüft werden.
 
 ---

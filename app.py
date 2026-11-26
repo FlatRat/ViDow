@@ -624,6 +624,79 @@ def probe_media_streams(filepath: str) -> dict[str, Any]:
     return result
 
 
+_WIN_GPU_ENCODER_CACHE: dict[str, list[str] | None] = {}
+
+
+def _detect_windows_gpu_encoder(target: str) -> list[str] | None:
+    """
+    Prüft unter Windows einmalig pro Sitzung (~80 ms), ob ein funktionierender
+    GPU-Hardware-Encoder (NVIDIA NVENC, AMD AMF oder Intel QuickSync QSV) bereitsteht.
+    """
+    if sys.platform != "win32" or not FFMPEG_PATH:
+        return None
+    if target in _WIN_GPU_ENCODER_CACHE:
+        cached = _WIN_GPU_ENCODER_CACHE[target]
+        return list(cached) if cached is not None else None
+
+    if target == "hevc":
+        candidates: list[list[str]] = [
+            ["-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0", "-pix_fmt", "yuv420p"],
+            ["-c:v", "hevc_amf", "-rc", "cqp", "-qp_i", "22", "-qp_p", "23", "-pix_fmt", "yuv420p"],
+            ["-c:v", "hevc_qsv", "-preset", "medium", "-global_quality", "23", "-pix_fmt", "yuv420p"],
+        ]
+    else:
+        candidates = [
+            ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "21", "-b:v", "0", "-pix_fmt", "yuv420p"],
+            ["-c:v", "h264_amf", "-rc", "cqp", "-qp_i", "20", "-qp_p", "21", "-pix_fmt", "yuv420p"],
+            ["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "21", "-pix_fmt", "yuv420p"],
+        ]
+
+    for enc_args in candidates:
+        probe_cmd = [
+            FFMPEG_PATH,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=384x256:d=0.04",
+            "-frames:v",
+            "1",
+            *enc_args,
+            "-f",
+            "null",
+            "-",
+        ]
+        try:
+            res = subprocess.run(
+                probe_cmd,
+                capture_output=True,
+                timeout=5,
+                creationflags=WIN_NO_WINDOW,
+            )
+            if res.returncode == 0:
+                _WIN_GPU_ENCODER_CACHE[target] = enc_args
+                return list(enc_args)
+        except Exception:
+            continue
+
+    _WIN_GPU_ENCODER_CACHE[target] = None
+    return None
+
+
+def _replace_file_with_retry(tmp_path: Path, src_path: Path, attempts: int = 10) -> None:
+    """Ersetzt Zieldatei atomar; wiederholt unter Windows kurz bei Defender-/Explorer-Sperren (WinError 32)."""
+    for idx in range(attempts):
+        try:
+            os.replace(tmp_path, src_path)
+            return
+        except OSError:
+            if idx == attempts - 1:
+                raise
+            time.sleep(0.25)
+
+
 def ensure_playable_video_container(
     filepath: str,
     codec: str,
@@ -633,14 +706,14 @@ def ensure_playable_video_container(
     is_cancelled: Any = None,
 ) -> str:
     """
-    Stellt sicher, dass heruntergeladene MP4-/MOV-Videos in macOS QuickTime Player, Finder
-    und Windows Media Player sofort abspielbar sind:
+    Stellt sicher, dass heruntergeladene MP4-/MOV-Videos in Windows Media Player, Explorer,
+    macOS QuickTime Player und Finder sofort abspielbar sind:
     - Nativ kompatibles H.264 (`avc1`) / HEVC (`hvc1`) + AAC bleibt unangetastet (0 s).
     - HEVC mit `hev1`-Tag wird verlustfrei auf `hvc1` umgepackt (<1 s).
     - Opus/Vorbis-Audio in MP4/MOV wird bei kopierter Videospur nach AAC gewandelt.
     - VP9/AV1-Streams (z. B. YouTube 2K/4K) in MP4/MOV werden automatisch nach H.264/HEVC
-      umcodiert (unter macOS primär per Apple VideoToolbox Hardware-Beschleunigung, mit
-      automatischem Software-Fallback auf libx264/libx265).
+      umcodiert (unter Windows per NVENC/AMF/QuickSync-GPU, unter macOS per VideoToolbox,
+      jeweils mit automatischem Software-Fallback auf libx264/libx265).
     """
     if not FFMPEG_PATH or not filepath or not _safe_is_file(Path(filepath)):
         return filepath
@@ -693,24 +766,32 @@ def ensure_playable_video_container(
         action_label = "Optimiere Audiospur nach AAC"
     elif video_mode == "copy_hvc1":
         video_attempts = [["-c:v", "copy", *hvc1_tag]]
-        action_label = "Setze QuickTime-kompatibles HEVC-Tag (hvc1)"
+        action_label = "Setze kompatibles HEVC-Tag (hvc1)"
     elif video_mode == "encode_h265":
-        action_label = f"Wandle {vcodec.upper()} nach HEVC für MP4/QuickTime"
+        action_label = f"Wandle {vcodec.upper()} nach HEVC (MP4-Kompatibilität)"
         video_attempts = []
         if sys.platform == "darwin":
             video_attempts.append(
                 ["-c:v", "hevc_videotoolbox", "-q:v", "66", "-allow_sw", "1", "-pix_fmt", "yuv420p", *hvc1_tag]
             )
+        elif sys.platform == "win32":
+            win_gpu = _detect_windows_gpu_encoder("hevc")
+            if win_gpu:
+                video_attempts.append([*win_gpu, *hvc1_tag])
         video_attempts.append(
             ["-c:v", "libx265", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p", *hvc1_tag]
         )
     else:
-        action_label = f"Wandle {vcodec.upper()} nach H.264 für MP4/QuickTime"
+        action_label = f"Wandle {vcodec.upper()} nach H.264 (MP4-Kompatibilität)"
         video_attempts = []
         if sys.platform == "darwin":
             video_attempts.append(
                 ["-c:v", "h264_videotoolbox", "-q:v", "66", "-allow_sw", "1", "-pix_fmt", "yuv420p"]
             )
+        elif sys.platform == "win32":
+            win_gpu = _detect_windows_gpu_encoder("h264")
+            if win_gpu:
+                video_attempts.append(win_gpu)
         video_attempts.append(
             ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
         )
@@ -719,7 +800,8 @@ def ensure_playable_video_container(
     mov_args = ["-movflags", "+faststart"] if cont in {"mp4", "mov"} else []
 
     src_path = Path(filepath)
-    tmp_path = src_path.with_name(f"{src_path.stem}.vidow_compat{src_path.suffix}")
+    # Kurzer Temp-Dateiname im selben Zielordner verhindert MAX_PATH-Überschreitungen (260 Zeichen) unter Windows
+    tmp_path = src_path.parent / f".vidow_tmp_{uuid.uuid4().hex[:8]}{src_path.suffix}"
 
     for v_args in video_attempts:
         try:
@@ -784,7 +866,7 @@ def ensure_playable_video_container(
             rc = -1
 
         if rc == 0 and _safe_is_file(tmp_path) and tmp_path.stat().st_size > 0:
-            os.replace(tmp_path, src_path)
+            _replace_file_with_retry(tmp_path, src_path)
             return str(src_path)
 
         try:
