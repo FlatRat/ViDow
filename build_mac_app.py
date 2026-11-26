@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-ViDow 2.0 — Standalone macOS App- & DMG-Builder
+ViDow 2.0 — Standalone macOS App-, DMG- & Download-ZIP-Builder
 Erzeugt ein komplett eigenständiges, auslieferbares macOS-App-Bundle ('ViDow.app')
 inklusive eingebetteter Python-Laufzeit, pywebview, yt-dlp, curl_cffi, integriertem
-ffmpeg (imageio-ffmpeg), Studio-Icons (.icns), Ad-hoc-Codesigning sowie einem
-versandfertigen 'ViDow-2.0.0-macOS.dmg' Disk-Image mit Applications-Symlink.
+ffmpeg (imageio-ffmpeg), Studio-Icons (.icns), Ad-hoc-Codesigning sowie:
+1. einem versandfertigen 'ViDow-<version>-macOS.dmg' Disk-Image (mit Applications-Symlink)
+2. einem fertigen Download-ZIP 'ViDow-<version>-macOS.zip' (inkl. ViDow.app, Anleitung & Extension)
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from pathlib import Path
 
 from generate_icons import generate_all_icons
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.2"
 BUNDLE_ID = "de.lucasgoedel.vidow"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -50,6 +51,7 @@ def _patch_info_plist(app_bundle: Path) -> None:
             "CFBundleIconFile": "AppIcon.icns",
             "LSMinimumSystemVersion": "11.0",
             "LSApplicationCategoryType": "public.app-category.video",
+            "NSHumanReadableCopyright": "© lg-craft (https://lg-craft.com)",
             "NSHighResolutionCapable": True,
             "NSSupportsAutomaticGraphicsSwitching": True,
             # Erlaubt WebKit den Zugriff auf den lokalen ViDow-HTTP-Server (127.0.0.1)
@@ -104,6 +106,71 @@ def create_dmg(app_bundle: Path, dmg_path: Path) -> None:
                 "-format",
                 "UDZO",
                 str(dmg_path),
+            ],
+            check=True,
+        )
+
+
+def create_download_zip(app_bundle: Path, zip_path: Path) -> None:
+    """
+    Verpackt die signierte ViDow.app + Kurzanleitung + optionale Browser-Erweiterung
+    per macOS 'ditto' in ein fertiges Download-ZIP (erhält Symlinks, Rechte & Codesignatur).
+    """
+    if zip_path.exists():
+        zip_path.unlink()
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+
+    readme_txt = (
+        f"ViDow Studio v{APP_VERSION} für macOS (ab macOS 11)\n"
+        "====================================================\n\n"
+        "Ein Projekt von lg-craft (https://lg-craft.com)\n\n"
+        "INSTALLATION (1 KLICK):\n"
+        "1. Ziehe 'ViDow.app' in deinen Ordner 'Programme' (/Applications).\n"
+        "2. Öffne 'ViDow' aus dem Programme-Ordner.\n"
+        "   - Python oder ffmpeg müssen NICHT separat installiert werden (alles integriert).\n"
+        "   - Hinweis beim allerersten Start (macOS Gatekeeper):\n"
+        "     Falls macOS meldet, dass die App nicht verifiziert werden kann, klicke mit\n"
+        "     Rechtsklick (Ctrl-Klick) auf 'ViDow.app' -> 'Öffnen' (oder bestätige sie\n"
+        "     unter 'Systemeinstellungen -> Datenschutz & Sicherheit -> Dennoch öffnen').\n\n"
+        "OPTIONALE BROWSER-ERWEITERUNG (Chrome / Brave / Edge):\n"
+        "1. Lege den mitgelieferten Ordner 'extension' an einen festen Ort (z. B. Dokumente).\n"
+        "2. Öffne 'chrome://extensions' (bzw. 'brave://extensions' oder 'edge://extensions'),\n"
+        "   aktiviere oben rechts den 'Entwicklermodus' und wähle\n"
+        "   'Entpackte Erweiterung laden' -> Ordner 'extension'.\n"
+    )
+
+    folder_name = f"ViDow-{APP_VERSION}-macOS"
+    with tempfile.TemporaryDirectory(prefix="vidow_zip_") as staging_str:
+        staging_root = Path(staging_str) / folder_name
+        staging_root.mkdir(parents=True, exist_ok=True)
+
+        staged_app = staging_root / "ViDow.app"
+        subprocess.run(
+            ["ditto", "--norsrc", "--noextattr", str(app_bundle), str(staged_app)],
+            check=True,
+        )
+        (staging_root / "LIESMICH - Installation.txt").write_text(readme_txt, encoding="utf-8")
+
+        ext_dir = BASE_DIR / "extension"
+        if ext_dir.is_dir():
+            staged_ext = staging_root / "extension"
+            shutil.copytree(
+                ext_dir,
+                staged_ext,
+                ignore=shutil.ignore_patterns(".DS_Store", "__pycache__", ".*"),
+            )
+
+        subprocess.run(["xattr", "-cr", str(staging_root)], check=False)
+        subprocess.run(
+            [
+                "ditto",
+                "-c",
+                "-k",
+                "--norsrc",
+                "--noextattr",
+                "--keepParent",
+                str(staging_root),
+                str(zip_path),
             ],
             check=True,
         )
@@ -200,6 +267,8 @@ def build_standalone(skip_dmg: bool = False) -> None:
         "webview",
         "--collect-all",
         "imageio_ffmpeg",
+        "--hidden-import",
+        "PyObjCTools.AppHelper",
         str(BASE_DIR / "app.py"),
     ]
     print("\n📦 Kompiliere eigenständiges macOS App-Bundle (PyInstaller)...")
@@ -237,24 +306,36 @@ def build_standalone(skip_dmg: bool = False) -> None:
     if cmd_file.exists():
         _apply_finder_icon(cmd_file, STATIC_DIR / "icon.png")
 
-    # 7. Auslieferbares .dmg Installer-Image bauen (aus dem strikt signierten dist/ViDow.app)
+    # Alte DMG-/ZIP-Versionen im dist-Ordner aufräumen
+    if DIST_DIR.is_dir():
+        for old_pkg in list(DIST_DIR.glob("ViDow-*-macOS.dmg")) + list(DIST_DIR.glob("ViDow-*-macOS.zip")):
+            old_pkg.unlink(missing_ok=True)
+
+    # 7. Auslieferbares .dmg Installer-Image & Download-.zip bauen
     dmg_path = DIST_DIR / f"ViDow-{APP_VERSION}-macOS.dmg"
+    zip_path = DIST_DIR / f"ViDow-{APP_VERSION}-macOS.zip"
     if not skip_dmg:
         print(f"💿 Erzeuge auslieferbares Disk-Image: {dmg_path.name}...")
         create_dmg(dist_app, dmg_path)
 
+    print(f"🗜️ Schnüre fertiges Download-ZIP: {zip_path.name}...")
+    create_download_zip(dist_app, zip_path)
+
     print("\n" + "=" * 64)
-    print("✅ Native macOS-App erfolgreich gebaut!")
+    print("✅ Native macOS-App & Download-Pakete erfolgreich gebaut!")
     print(f"🍏 Standalone App:  {dist_app}")
     print(f"🍏 Projekt-Kopie:   {ROOT_APP_BUNDLE}")
     if not skip_dmg and dmg_path.is_file():
-        size_mb = dmg_path.stat().st_size / (1024 * 1024)
-        print(f"💿 Installer-DMG:   {dmg_path} ({size_mb:.1f} MB)")
+        dmg_mb = dmg_path.stat().st_size / (1024 * 1024)
+        print(f"💿 Installer-DMG:   {dmg_path} ({dmg_mb:.1f} MB)")
+    if zip_path.is_file():
+        zip_mb = zip_path.stat().st_size / (1024 * 1024)
+        print(f"📦 Download-ZIP:    {zip_path} ({zip_mb:.1f} MB)")
     print("=" * 64)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ViDow macOS App & DMG Builder")
+    parser = argparse.ArgumentParser(description="ViDow macOS App, DMG & Download-ZIP Builder")
     parser.add_argument(
         "--dev-wrapper",
         action="store_true",
@@ -265,11 +346,24 @@ def main() -> None:
         action="store_true",
         help="Überspringt die Erstellung der .dmg-Datei.",
     )
+    parser.add_argument(
+        "--zip-only",
+        action="store_true",
+        help=" Schnürt direkt das fertige Download-ZIP aus einem vorhandenen dist/ViDow.app-Build.",
+    )
     args = parser.parse_args()
 
     if args.dev_wrapper:
         icns = generate_all_icons()
         build_dev_wrapper(icns)
+    elif args.zip_only:
+        dist_app = DIST_DIR / "ViDow.app"
+        if not dist_app.is_dir():
+            raise SystemExit(f"Kein vorhandenes App-Bundle unter {dist_app} gefunden.")
+        zip_path = DIST_DIR / f"ViDow-{APP_VERSION}-macOS.zip"
+        create_download_zip(dist_app, zip_path)
+        zip_mb = zip_path.stat().st_size / (1024 * 1024)
+        print(f"📦 Download-ZIP erstellt: {zip_path} ({zip_mb:.1f} MB)")
     else:
         build_standalone(skip_dmg=args.no_dmg)
 

@@ -28,7 +28,7 @@ from typing import Any
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.2"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 WINDOW_TITLE = "ViDow — Studio Video Downloader"
 WIN_NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
@@ -554,6 +554,18 @@ def apply_impersonate_and_cookies(
             elif cookies_browser == "edge":
                 ed_dir = home / "Library/Application Support/Microsoft Edge"
                 valid_cookie_store = ed_dir.exists() and any(ed_dir.glob("*/Cookies"))
+            elif cookies_browser == "opera":
+                op_dir = home / "Library/Application Support/com.operasoftware.Opera"
+                op_gx_dir = home / "Library/Application Support/com.operasoftware.OperaGX"
+                valid_cookie_store = (
+                    (op_dir / "Cookies").exists()
+                    or (op_dir.exists() and any(op_dir.glob("*/Cookies")))
+                    or (op_gx_dir / "Cookies").exists()
+                    or (op_gx_dir.exists() and any(op_gx_dir.glob("*/Cookies")))
+                )
+            elif cookies_browser == "vivaldi":
+                vv_dir = home / "Library/Application Support/Vivaldi"
+                valid_cookie_store = vv_dir.exists() and any(vv_dir.glob("*/Cookies"))
         elif sys.platform == "win32":
             if cookies_browser == "safari":
                 valid_cookie_store = False
@@ -2136,6 +2148,33 @@ def apply_windows_window_styling(theme_mode: str | None = None) -> bool:
         return False
 
 
+def apply_macos_window_styling(theme_mode: str | None = None) -> bool:
+    """Synchronisiert unter macOS das native NSWindow-/Titelleisten-Erscheinungsbild (Aqua / DarkAqua / System)."""
+    global CURRENT_THEME_MODE
+    if theme_mode is not None:
+        CURRENT_THEME_MODE = theme_mode
+    if sys.platform != "darwin":
+        return False
+    try:
+        import AppKit
+        from PyObjCTools import AppHelper
+
+        def _set_appearance() -> None:
+            app = AppKit.NSApplication.sharedApplication()
+            if CURRENT_THEME_MODE == "dark":
+                appearance = AppKit.NSAppearance.appearanceNamed_("NSAppearanceNameDarkAqua")
+            elif CURRENT_THEME_MODE == "light":
+                appearance = AppKit.NSAppearance.appearanceNamed_("NSAppearanceNameAqua")
+            else:
+                appearance = None
+            app.setAppearance_(appearance)
+
+        AppHelper.callAfter(_set_appearance)
+        return True
+    except Exception:
+        return False
+
+
 def focus_local_window() -> bool:
     """Holt das geöffnete ViDow-Fenster in den Vordergrund (z. B. bei erneutem App-Start)."""
     if ACTIVE_WINDOW is not None:
@@ -2163,6 +2202,22 @@ def focus_local_window() -> bool:
                 return True
             except Exception:
                 pass
+    elif sys.platform == "darwin":
+        try:
+            import AppKit
+            from PyObjCTools import AppHelper
+
+            def _activate_mac() -> None:
+                app = AppKit.NSApplication.sharedApplication()
+                for win in app.windows():
+                    if win.isMiniaturized():
+                        win.deminiaturize_(None)
+                app.activateIgnoringOtherApps_(True)
+
+            AppHelper.callAfter(_activate_mac)
+            return True
+        except Exception:
+            pass
     return ACTIVE_WINDOW is not None
 
 
@@ -2331,8 +2386,21 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
 
         if route == "/api/window-theme":
             theme_val = str(payload.get("theme") or "light dark").strip()
-            applied = apply_windows_window_styling(theme_val)
+            if sys.platform == "darwin":
+                applied = apply_macos_window_styling(theme_val)
+            else:
+                applied = apply_windows_window_styling(theme_val)
             self._send_json({"ok": True, "applied": applied})
+            return
+
+        if route == "/api/open-external":
+            ext_url = str(payload.get("url") or "").strip()
+            parsed_ext = urllib.parse.urlparse(ext_url)
+            if parsed_ext.scheme not in {"http", "https"} or not parsed_ext.netloc:
+                self._send_json({"ok": False, "error": "Ungültige externe URL."}, HTTPStatus.BAD_REQUEST)
+                return
+            opened = bool(webbrowser.open(ext_url))
+            self._send_json({"ok": True, "opened": opened})
             return
 
         if route == "/api/pick-folder":
@@ -2508,6 +2576,7 @@ def _on_desktop_window_ready() -> None:
     """Wird direkt nach dem Öffnen des nativen Fensters aufgerufen (setzt Icons & OS-Titelleiste)."""
     if sys.platform == "darwin":
         apply_macos_dock_icon()
+        apply_macos_window_styling()
     elif sys.platform == "win32":
         for _ in range(20):
             if apply_windows_window_styling():

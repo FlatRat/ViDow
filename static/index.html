@@ -35,7 +35,7 @@
         <div class="brand-copy">
           <div class="brand-title-row">
             <h1>ViDow</h1>
-            <span id="app-version" class="version-pill">v2.0</span>
+            <span id="app-version" class="version-pill">v2.0.2</span>
           </div>
           <p class="subtitle">Studio Video- &amp; Audio-Downloader • Quer- &amp; Hochformat</p>
         </div>
@@ -225,7 +225,7 @@
             <div class="section-head">
               <h2 class="section-title">Zielordner &amp; Dateiname</h2>
               <button type="button" id="btn-open-folder" class="btn btn-ghost btn-sm" title="Aktuellen Zielordner öffnen">
-                Im Explorer zeigen
+                Ordner zeigen
               </button>
             </div>
 
@@ -234,7 +234,7 @@
                 type="text"
                 id="output-dir"
                 name="output_dir"
-                placeholder="Downloads\ViDow"
+                placeholder="Downloads/ViDow"
                 autocorrect="off"
                 autocapitalize="off"
                 spellcheck="false"
@@ -309,7 +309,7 @@
                 <label for="cookies-browser-select">Browser-Session / Cookies übernehmen (für Login &amp; Altersfreigabe)</label>
                 <select id="cookies-browser-select" name="cookies_browser" class="ui-select">
                   <option value="none">Keine Cookies (Standard)</option>
-                  <option value="firefox">Mozilla Firefox (Empfohlen unter Windows)</option>
+                  <option value="firefox">Mozilla Firefox</option>
                   <option value="edge">Microsoft Edge</option>
                   <option value="chrome">Google Chrome</option>
                   <option value="brave">Brave Browser</option>
@@ -383,6 +383,12 @@
         </section>
       </aside>
     </div>
+
+    <footer class="app-footer">
+      <span>ViDow Studio</span>
+      <span class="footer-sep" aria-hidden="true">•</span>
+      <span>Ein Projekt von <a href="https://lg-craft.com" target="_blank" rel="noopener noreferrer" class="creator-link" data-external-link>lg-craft</a></span>
+    </footer>
   </main>
 
   <!-- Darstellungs-Popover außerhalb der Top-Bar (verhindert backdrop-filter Containing-Block-Clipping) -->

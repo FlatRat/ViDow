@@ -4,8 +4,8 @@ ViDow 2.0 — Native Windows App-, Setup-Installer- & Download-ZIP-Builder
 1. Kompiliert ViDow mit PyInstaller zu einer eigenständigen Windows-Anwendung ('dist/ViDow/ViDow.exe')
    inklusive Windows-Versionsmetadaten, integriertem ffmpeg (imageio-ffmpeg) & Studio-Icons (.ico).
 2. Erzeugt mit Inno Setup 6 einen vollwertigen Windows-10/11-Installer
-   ('dist/ViDow-2.0.0-Windows-Setup.exe') mit Startmenü-/Desktop-Verknüpfung & Deinstallationsroutine.
-3. Schnürt daraus das fertige Download-Paket ('dist/ViDow-2.0.0-Windows-Setup.zip') inklusive
+   ('dist/ViDow-2.0.2-Windows-Setup.exe') mit Startmenü-/Desktop-Verknüpfung & Deinstallationsroutine.
+3. Schnürt daraus das fertige Download-Paket ('dist/ViDow-2.0.2-Windows-Setup.zip') inklusive
    Setup-Installer, Kurzanleitung und optionaler Browser-Erweiterung.
 """
 
@@ -19,8 +19,8 @@ import sys
 import zipfile
 from pathlib import Path
 
-APP_VERSION = "2.0.0"
-VERSION_TUPLE = (2, 0, 0, 0)
+APP_VERSION = "2.0.2"
+VERSION_TUPLE = (2, 0, 2, 0)
 INNO_APP_ID = "{{8F4E2D91-7C3A-4B6E-9D12-5A8C3E7F1020}"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -87,11 +87,11 @@ VSVersionInfo(
         StringTable(
           '040704B0',
           [
-            StringStruct('CompanyName', 'ViDow Studio'),
+            StringStruct('CompanyName', 'lg-craft'),
             StringStruct('FileDescription', 'ViDow — Studio Video & Audio Downloader'),
             StringStruct('FileVersion', '{v_str}'),
             StringStruct('InternalName', 'ViDow'),
-            StringStruct('LegalCopyright', 'Copyright (c) ViDow Studio'),
+            StringStruct('LegalCopyright', 'Copyright (c) lg-craft (https://lg-craft.com)'),
             StringStruct('OriginalFilename', 'ViDow.exe'),
             StringStruct('ProductName', 'ViDow Studio'),
             StringStruct('ProductVersion', '{APP_VERSION}')
@@ -140,7 +140,9 @@ AppId={INNO_APP_ID}
 AppName=ViDow Studio
 AppVersion={APP_VERSION}
 AppVerName=ViDow Studio {APP_VERSION}
-AppPublisher=ViDow Studio
+AppPublisher=lg-craft
+AppPublisherURL=https://lg-craft.com
+AppSupportURL=https://lg-craft.com
 DefaultDirName={{autopf}}\\ViDow
 DefaultGroupName=ViDow Studio
 DisableProgramGroupPage=yes
@@ -199,6 +201,7 @@ def package_setup_download_zip(setup_exe: Path, zip_path: Path) -> None:
     readme_txt = (
         f"ViDow Studio v{APP_VERSION} für Windows 10 & Windows 11 (64-Bit)\r\n"
         "================================================================\r\n\r\n"
+        "Ein Projekt von lg-craft (https://lg-craft.com)\r\n\r\n"
         "INSTALLATION (1 KLICK):\r\n"
         f"1. Doppelklicke auf '{setup_exe.name}'.\r\n"
         "   (Hinweis: Falls Windows SmartScreen beim ersten Start fragt,\r\n"

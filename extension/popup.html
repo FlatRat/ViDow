@@ -242,6 +242,32 @@
       min-height: 16px;
       text-align: center;
     }
+
+    .popup-footer {
+      margin-top: 8px;
+      padding-top: 7px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      font-size: 10.5px;
+      color: var(--muted);
+    }
+
+    :where(.creator-link) {
+      color: var(--text);
+      font-weight: 560;
+      text-decoration: underline solid color-mix(in srgb, currentColor, transparent) max(1px, 0.08em);
+      text-underline-offset: 0.2em;
+      transition: color 0.15s ease, text-decoration-color 0.15s ease;
+    }
+
+    :where(.creator-link:is(:hover, :focus-visible)) {
+      color: var(--brand);
+      text-decoration-color: currentColor;
+      text-decoration-thickness: max(1px, 0.12em);
+    }
   </style>
 </head>
 <body>
@@ -304,6 +330,12 @@
   </div>
 
   <div id="feedback" class="feedback"></div>
+
+  <footer class="popup-footer">
+    <span>ViDow Studio</span>
+    <span aria-hidden="true">•</span>
+    <span>von <a href="https://lg-craft.com" target="_blank" rel="noopener noreferrer" class="creator-link">lg-craft</a></span>
+  </footer>
 
   <script src="popup.js"></script>
 </body>

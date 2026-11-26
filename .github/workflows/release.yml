@@ -27,14 +27,16 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
-      - name: Build ViDow.app & DMG
+      - name: Build ViDow.app, DMG & Download ZIP
         run: python build_mac_app.py
 
-      - name: Upload macOS DMG artifact
+      - name: Upload macOS DMG & ZIP artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ViDow-macOS-DMG
-          path: dist/*.dmg
+          name: ViDow-macOS-Release
+          path: |
+            dist/*.dmg
+            dist/*.zip
 
   build-windows:
     name: Windows Standalone (.exe / .zip)

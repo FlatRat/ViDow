@@ -226,7 +226,7 @@
   .app-shell {
     max-width: 1360px;
     margin-inline: auto;
-    padding: 1.35rem 1.5rem 2.75rem;
+    padding: 1.35rem 1.5rem 1.85rem;
   }
 
   .workspace-grid {
@@ -1283,6 +1283,39 @@
     }
   }
 
+  /* Dezent integrierter Studio-Footer & Urheber-Hinweis */
+  .app-footer {
+    margin-top: 1.65rem;
+    padding-top: 0.9rem;
+    border-top: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    font-size: 0.76rem;
+    letter-spacing: 0.01em;
+    color: var(--text-subtle);
+  }
+
+  .footer-sep {
+    opacity: 0.55;
+  }
+
+  :where(.creator-link) {
+    color: var(--text-muted);
+    font-weight: 560;
+    text-decoration: underline solid color-mix(in srgb, currentColor, transparent) max(1px, 0.08em);
+    text-underline-offset: 0.22em;
+    transition: color 0.16s ease, text-decoration-color 0.16s ease;
+  }
+
+  :where(.creator-link:is(:hover, :focus-visible)) {
+    color: var(--brand);
+    text-decoration-color: currentColor;
+    text-decoration-thickness: max(1px, 0.12em);
+  }
+
   /* Popover Manual Toast Stack Container */
   .toast-stack {
     position: fixed;
@@ -1364,7 +1397,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    :where(.btn, .mode-pill, .progress-fill, .disclosure-summary::after, .toast-popover) {
+    :where(.btn, .mode-pill, .progress-fill, .disclosure-summary::after, .toast-popover, .creator-link) {
       transition: none !important;
     }
     progress.loading-spinner:indeterminate {

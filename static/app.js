@@ -400,9 +400,10 @@ async function initStatus() {
     if (data.platform !== "darwin") {
       const safariOpt = document.getElementById("cookie-opt-safari");
       if (safariOpt) safariOpt.remove();
-    } else {
-      const ffOpt = els.cookiesBrowserSelect?.querySelector('option[value="firefox"]');
-      if (ffOpt) ffOpt.textContent = "Mozilla Firefox";
+      if (data.platform === "win32") {
+        const ffOpt = els.cookiesBrowserSelect?.querySelector('option[value="firefox"]');
+        if (ffOpt) ffOpt.textContent = "Mozilla Firefox (Empfohlen unter Windows)";
+      }
     }
     if (els.btnPaste) {
       els.btnPaste.title =
@@ -858,6 +859,26 @@ function renderJobs(jobs) {
     els.jobsList.appendChild(item);
   }
 }
+
+document.addEventListener("click", async (e) => {
+  const link = e.target.closest?.("a[data-external-link]");
+  if (!link || e.defaultPrevented) return;
+  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  e.preventDefault();
+  const targetUrl = link.href;
+  try {
+    const res = await fetch("/api/open-external", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: targetUrl }),
+    });
+    if (!res.ok) {
+      window.open(targetUrl, "_blank", "noopener,noreferrer");
+    }
+  } catch {
+    window.open(targetUrl, "_blank", "noopener,noreferrer");
+  }
+});
 
 initStatus();
 fetchJobs();

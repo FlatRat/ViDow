@@ -7,6 +7,20 @@ und das Projekt folgt [Semantic Versioning](https://semver.org/lang/de/).
 
 ---
 
+## [2.0.2] - 2026-11-26
+
+### ✨ Hinzugefügt
+- **Fertiges macOS-Download-ZIP (`build_mac_app.py`):** Erzeugt neben `ViDow-2.0.2-macOS.dmg` automatisch das versandfertige Download-Archiv `ViDow-2.0.2-macOS.zip` (mit signierter `ViDow.app`, Kurzanleitung und optionaler Browser-Erweiterung unter Erhalt aller Symlinks & Codesignaturen) – auch direkt in GitHub Actions (`.github/workflows/release.yml`).
+- **Nativer Windows-Installer & Download-ZIP (`build_windows_exe.py`):** Kompiliert per Inno Setup 6 automatisch `ViDow-2.0.2-Windows-Setup.exe` sowie das fertige Download-Paket `ViDow-2.0.2-Windows-Setup.zip`.
+- **Urheber-Hinweis (`lg-craft`):** Dezente Verlinkung auf [lg-craft](https://lg-craft.com) im Studio-Footer, in der Browser-Erweiterung sowie in den macOS-/Windows-App-Metadaten (inkl. Öffnen im Systembrowser via `/api/open-external`).
+
+### 🛠️ Behoben & Verbessert
+- **macOS- & Windows-Fensterintegration:** Synchronisiert die native macOS-Titelleiste (`NSWindow` Aqua/DarkAqua) und Windows-DWM-Titelleiste live mit der gewählten App-Darstellung; Single-Instance-Erkennung holt ein bereits geöffnetes oder minimiertes Fenster auf beiden Systemen zuverlässig in den Vordergrund.
+- **Browser-Cookies & Extension-Auto-Discovery:** Cookie-Pfade für Opera/Opera GX und Vivaldi auch unter macOS ergänzt; die Browser-Erweiterung erkennt laufende ViDow-Instanzen automatisch auf den Ports `8765–8767`.
+- **WebKit Popover-Darstellung (`v2.0.1`):** Clipping durch `backdrop-filter` und den nativen WebKit-UA-Rahmen am Darstellungs-Popover behoben.
+
+---
+
 ## [2.0.0] - 2026-11-25
 
 ### ✨ Hinzugefügt (Native Standalone-Auslieferung, Studio-UI & neues Icon)
