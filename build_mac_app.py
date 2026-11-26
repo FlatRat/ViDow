@@ -22,7 +22,7 @@ from pathlib import Path
 
 from generate_icons import generate_all_icons
 
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.0.3"
 BUNDLE_ID = "de.lucasgoedel.vidow"
 
 BASE_DIR = Path(__file__).resolve().parent

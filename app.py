@@ -29,7 +29,7 @@ from typing import Any
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.0.3"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 WINDOW_TITLE = "ViDow — Studio Video Downloader"
 WIN_NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0

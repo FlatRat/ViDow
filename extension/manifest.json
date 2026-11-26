@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ViDow Studio Helper (Stream-Sniffer & Ad-Skipper)",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Erkennt echte Video-Streams (.m3u8/.mpd/.mp4), filtert Pre-Roll-Werbung heraus und sendet Videos mit 1 Klick an dein lokales ViDow Studio.",
   "icons": {
     "16": "icons/icon-16.png",

@@ -4,8 +4,8 @@ ViDow 2.0 — Native Windows App-, Setup-Installer- & Download-ZIP-Builder
 1. Kompiliert ViDow mit PyInstaller zu einer eigenständigen Windows-Anwendung ('dist/ViDow/ViDow.exe')
    inklusive Windows-Versionsmetadaten, integriertem ffmpeg (imageio-ffmpeg) & Studio-Icons (.ico).
 2. Erzeugt mit Inno Setup 6 einen vollwertigen Windows-10/11-Installer
-   ('dist/ViDow-2.0.2-Windows-Setup.exe') mit Startmenü-/Desktop-Verknüpfung & Deinstallationsroutine.
-3. Schnürt daraus das fertige Download-Paket ('dist/ViDow-2.0.2-Windows-Setup.zip') inklusive
+   ('dist/ViDow-2.0.3-Windows-Setup.exe') mit Startmenü-/Desktop-Verknüpfung & Deinstallationsroutine.
+3. Schnürt daraus das fertige Download-Paket ('dist/ViDow-2.0.3-Windows-Setup.zip') inklusive
    Setup-Installer, Kurzanleitung und optionaler Browser-Erweiterung.
 """
 
@@ -19,8 +19,8 @@ import sys
 import zipfile
 from pathlib import Path
 
-APP_VERSION = "2.0.2"
-VERSION_TUPLE = (2, 0, 2, 0)
+APP_VERSION = "2.0.3"
+VERSION_TUPLE = (2, 0, 3, 0)
 INNO_APP_ID = "{{8F4E2D91-7C3A-4B6E-9D12-5A8C3E7F1020}"
 
 BASE_DIR = Path(__file__).resolve().parent

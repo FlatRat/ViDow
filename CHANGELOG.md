@@ -7,6 +7,15 @@ und das Projekt folgt [Semantic Versioning](https://semver.org/lang/de/).
 
 ---
 
+## [2.0.3] - 2026-11-26
+
+### 🛠️ Behoben & Verbessert
+- **Absturzsichere Ordner- & Cookie-Zugriffe (macOS & Windows):** Fängt `PermissionError` / `OSError` bei gesperrten Benutzer-, System- oder Browser-Profilordnern zuverlässig ab und weicht für `settings.json`/Logs bei nicht beschreibbarem Konfigurationspfad automatisch aus.
+- **Footer-Farbtokens im Hell-/Dunkel-Modus:** Nutzt im Studio-Footer konsistent die adaptiven Design-Tokens (`--muted` / `--text`) für sauberen Kontrast in Hell- und Studio-Dark-Darstellung.
+- **Externe Links & Build-Aufräumung unter Windows:** Öffnet externe Links unter Windows bevorzugt via `os.startfile()` und bereinigt veraltete Setup-/ZIP-Artefakte in `dist/` vor neuen Builds.
+
+---
+
 ## [2.0.2] - 2026-11-26
 
 ### ✨ Hinzugefügt
