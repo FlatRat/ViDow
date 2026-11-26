@@ -29,7 +29,7 @@ from typing import Any
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.0.4"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 WINDOW_TITLE = "ViDow — Studio Video Downloader"
 WIN_NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
@@ -386,6 +386,7 @@ def load_settings() -> dict[str, Any]:
         "codec": "auto",
         "container": "mp4",
         "audio_format": "mp3",
+        "recode_if_needed": True,
         "skip_preroll_ads": True,
         "min_duration": 45,
         "sponsorblock": False,
@@ -536,28 +537,262 @@ def build_format_selector(quality: str, codec: str, container: str, audio_format
 def build_format_sort(quality: str, codec: str, container: str) -> list[str]:
     """
     Erzeugt die yt-dlp `format_sort`-Kriterien (`-S`).
-    `res:<N>` nutzt in yt-dlp `min(width, height)` und funktioniert dadurch identisch
-    für 16:9-Querformat, 9:16-/4:5-Hochformat, 1:1-Videos und Streams ohne Breitenangabe.
+    - `res:<N>` nutzt `min(width, height)` (identisch für 16:9-Querformat & 9:16-Hochformat).
+    - Für MP4/MOV bevorzugen wir innerhalb der Zielauflösung nativ abspielbares H.264/HEVC + AAC,
+      damit Videos bis 1080p sofort ohne Re-Encoding in QuickTime & Windows laufen (statt AV1/VP9).
+    - Liefert YouTube bei 2K/4K ausschließlich VP9/AV1, wird VP9 + M4A bevorzugt und anschließend
+      bei aktiver Kompatibilitätsoption automatisch nach H.264/HEVC gewandelt.
     """
     if quality == "audio":
         return []
 
     sort_spec: list[str] = []
     q_clean = str(quality or "best").strip().lower().rstrip("p")
-    if q_clean.isdigit() and int(q_clean) > 0:
-        sort_spec.append(f"res:{int(q_clean)}")
-    else:
-        sort_spec.append("res")
+    res_token = f"res:{int(q_clean)}" if (q_clean.isdigit() and int(q_clean) > 0) else "res"
+
+    if not FFMPEG_PATH and container in {"mp4", "mov"} and codec in {"auto", "h264", "h265"}:
+        target_vc = "h265" if codec == "h265" else "h264"
+        return [f"vcodec:{target_vc}", "acodec:aac", res_token, "ext:mp4:m4a"]
+
+    sort_spec.append(res_token)
 
     if codec in {"h264", "h265", "vp9", "av1"}:
         sort_spec.append(f"vcodec:{codec}")
-
-    if container == "mp4" and codec in {"auto", "h264", "h265"}:
-        sort_spec.append("ext:mp4:m4a")
-    elif container == "webm" and codec in {"auto", "vp9", "av1"}:
+        if container in {"mp4", "mov"} and codec in {"h264", "h265"}:
+            sort_spec.append("acodec:aac")
+        elif container == "webm" and codec in {"vp9", "av1"}:
+            sort_spec.append("acodec:opus")
+            sort_spec.append("ext:webm:webm")
+    elif container in {"mp4", "mov"}:
+        sort_spec.append("vcodec:h264")
+        sort_spec.append("acodec:aac")
+    elif container == "webm":
+        sort_spec.append("vcodec:vp9")
+        sort_spec.append("acodec:opus")
         sort_spec.append("ext:webm:webm")
 
     return sort_spec
+
+
+def probe_media_streams(filepath: str) -> dict[str, Any]:
+    """Liest Video-/Audio-Codec, FourCC-Tag und Dauer über `ffmpeg -i` aus (ohne separates ffprobe)."""
+    result: dict[str, Any] = {
+        "vcodec": "",
+        "vtag": "",
+        "acodec": "",
+        "duration": 0.0,
+    }
+    if not FFMPEG_PATH or not _safe_is_file(Path(filepath)):
+        return result
+    try:
+        proc = subprocess.run(
+            [FFMPEG_PATH, "-hide_banner", "-i", filepath],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            creationflags=WIN_NO_WINDOW,
+        )
+        info_text = proc.stderr or ""
+    except Exception:
+        return result
+
+    dur_m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", info_text)
+    if dur_m:
+        result["duration"] = (
+            int(dur_m.group(1)) * 3600
+            + int(dur_m.group(2)) * 60
+            + float(dur_m.group(3))
+        )
+
+    vid_m = re.search(
+        r"Stream\s+#\d+:\d+[^\n]*?:\s*Video:\s*([a-zA-Z0-9_.-]+)(.*?)(?:\n|$)",
+        info_text,
+    )
+    if vid_m:
+        result["vcodec"] = vid_m.group(1).lower()
+        rest_v = vid_m.group(2)
+        tag_m = re.search(r"\(([a-zA-Z0-9]{4})\s*/\s*0x[0-9a-fA-F]+\)", rest_v)
+        if tag_m:
+            result["vtag"] = tag_m.group(1).lower()
+
+    aud_m = re.search(r"Stream\s+#\d+:\d+[^\n]*?:\s*Audio:\s*([a-zA-Z0-9_.-]+)", info_text)
+    if aud_m:
+        result["acodec"] = aud_m.group(1).lower()
+
+    return result
+
+
+def ensure_playable_video_container(
+    filepath: str,
+    codec: str,
+    container: str,
+    recode_if_needed: bool,
+    on_progress: Any = None,
+    is_cancelled: Any = None,
+) -> str:
+    """
+    Stellt sicher, dass heruntergeladene MP4-/MOV-Videos in macOS QuickTime Player, Finder
+    und Windows Media Player sofort abspielbar sind:
+    - Nativ kompatibles H.264 (`avc1`) / HEVC (`hvc1`) + AAC bleibt unangetastet (0 s).
+    - HEVC mit `hev1`-Tag wird verlustfrei auf `hvc1` umgepackt (<1 s).
+    - Opus/Vorbis-Audio in MP4/MOV wird bei kopierter Videospur nach AAC gewandelt.
+    - VP9/AV1-Streams (z. B. YouTube 2K/4K) in MP4/MOV werden automatisch nach H.264/HEVC
+      umcodiert (unter macOS primär per Apple VideoToolbox Hardware-Beschleunigung, mit
+      automatischem Software-Fallback auf libx264/libx265).
+    """
+    if not FFMPEG_PATH or not filepath or not _safe_is_file(Path(filepath)):
+        return filepath
+
+    cont = (container or "mp4").lower()
+    req_codec = (codec or "auto").lower()
+
+    if req_codec in {"vp9", "av1"}:
+        return filepath
+    if cont not in {"mp4", "mov"} and not (recode_if_needed and req_codec in {"h264", "h265"}):
+        return filepath
+
+    meta = probe_media_streams(filepath)
+    vcodec = meta["vcodec"]
+    vtag = meta["vtag"]
+    acodec = meta["acodec"]
+    duration = float(meta["duration"] or 0.0)
+
+    if not vcodec:
+        return filepath
+
+    video_mode = "copy"
+    if req_codec == "h264":
+        if vcodec != "h264" and (recode_if_needed or cont in {"mp4", "mov"}):
+            video_mode = "encode_h264"
+    elif req_codec == "h265":
+        if vcodec == "hevc":
+            if cont in {"mp4", "mov"} and vtag != "hvc1":
+                video_mode = "copy_hvc1"
+        elif recode_if_needed or (cont in {"mp4", "mov"} and vcodec not in {"h264", "hevc"}):
+            video_mode = "encode_h265"
+    else:
+        if vcodec == "h264":
+            video_mode = "copy"
+        elif vcodec == "hevc":
+            if vtag != "hvc1":
+                video_mode = "copy_hvc1"
+        elif recode_if_needed:
+            video_mode = "encode_h264"
+
+    mp4_safe_audio = {"aac", "mp3", "ac3", "eac3", "alac", ""}
+    audio_mode = "encode_aac" if (cont in {"mp4", "mov"} and acodec not in mp4_safe_audio) else "copy"
+
+    if video_mode == "copy" and audio_mode == "copy":
+        return filepath
+
+    hvc1_tag = ["-tag:v", "hvc1"] if cont in {"mp4", "mov"} else []
+    if video_mode == "copy":
+        video_attempts = [["-c:v", "copy"]]
+        action_label = "Optimiere Audiospur nach AAC"
+    elif video_mode == "copy_hvc1":
+        video_attempts = [["-c:v", "copy", *hvc1_tag]]
+        action_label = "Setze QuickTime-kompatibles HEVC-Tag (hvc1)"
+    elif video_mode == "encode_h265":
+        action_label = f"Wandle {vcodec.upper()} nach HEVC für MP4/QuickTime"
+        video_attempts = []
+        if sys.platform == "darwin":
+            video_attempts.append(
+                ["-c:v", "hevc_videotoolbox", "-q:v", "66", "-allow_sw", "1", "-pix_fmt", "yuv420p", *hvc1_tag]
+            )
+        video_attempts.append(
+            ["-c:v", "libx265", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p", *hvc1_tag]
+        )
+    else:
+        action_label = f"Wandle {vcodec.upper()} nach H.264 für MP4/QuickTime"
+        video_attempts = []
+        if sys.platform == "darwin":
+            video_attempts.append(
+                ["-c:v", "h264_videotoolbox", "-q:v", "66", "-allow_sw", "1", "-pix_fmt", "yuv420p"]
+            )
+        video_attempts.append(
+            ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+        )
+
+    audio_args = ["-c:a", "aac", "-b:a", "192k"] if audio_mode == "encode_aac" else ["-c:a", "copy"]
+    mov_args = ["-movflags", "+faststart"] if cont in {"mp4", "mov"} else []
+
+    src_path = Path(filepath)
+    tmp_path = src_path.with_name(f"{src_path.stem}.vidow_compat{src_path.suffix}")
+
+    for v_args in video_attempts:
+        try:
+            if _safe_exists(tmp_path):
+                tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        cmd = [
+            FFMPEG_PATH,
+            "-y",
+            "-hide_banner",
+            "-nostats",
+            "-progress",
+            "pipe:1",
+            "-threads",
+            "0",
+            "-i",
+            str(src_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            *v_args,
+            *audio_args,
+            *mov_args,
+            str(tmp_path),
+        ]
+
+        if callable(on_progress):
+            on_progress(0.0, f"{action_label}…")
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=WIN_NO_WINDOW,
+        )
+        try:
+            if proc.stdout is not None:
+                for raw_line in proc.stdout:
+                    if callable(is_cancelled) and is_cancelled():
+                        proc.kill()
+                        proc.wait(timeout=5)
+                        tmp_path.unlink(missing_ok=True)
+                        raise CancelledDownload("Download vom Nutzer abgebrochen.")
+                    line = raw_line.strip()
+                    if line.startswith("out_time_us=") and duration > 0 and callable(on_progress):
+                        val_str = line.split("=", 1)[1].strip()
+                        if val_str.lstrip("-").isdigit():
+                            sec_done = max(0.0, int(val_str) / 1_000_000.0)
+                            pct = min(99.5, (sec_done / duration) * 100.0)
+                            on_progress(round(pct, 1), f"{action_label} ({pct:.0f}%)…")
+            rc = proc.wait()
+        except CancelledDownload:
+            raise
+        except Exception:
+            proc.kill()
+            rc = -1
+
+        if rc == 0 and _safe_is_file(tmp_path) and tmp_path.stat().st_size > 0:
+            os.replace(tmp_path, src_path)
+            return str(src_path)
+
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    return filepath
 
 
 def apply_impersonate_and_cookies(
@@ -1256,6 +1491,31 @@ def extract_info_with_fallback(
         raise first_exc
 
 
+def should_ignore_playlist_for_url(url: str) -> bool:
+    """
+    Erkennt Einzelvideo-URLs, denen Plattformen wie YouTube automatisch einen Mix-/Radio-
+    oder Playlist-Parameter (`&list=RD...`, `&list=PL...`) angehängt haben.
+    So dauern Vorschau & Download bei Musikvideos nur ~2 Sekunden statt 50 Mix-Titel abzurufen.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return True
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    qs = urllib.parse.parse_qs(parsed.query)
+
+    if "/playlist" in path:
+        list_id = (qs.get("list") or [""])[0]
+        return list_id.startswith("RD")
+
+    if any(h in host for h in ("youtube.com", "youtu.be", "youtube-nocookie.com")):
+        if "v" in qs or "youtu.be" in host or "/shorts/" in path or "/live/" in path:
+            return True
+
+    return False
+
+
 def analyze_url(payload: dict[str, Any]) -> dict[str, Any]:
     url = str(payload.get("url") or "").strip()
     if not url:
@@ -1265,12 +1525,17 @@ def analyze_url(payload: dict[str, Any]) -> dict[str, Any]:
     min_duration = int(payload.get("min_duration") or 0)
     custom_headers = payload.get("headers") or {}
 
+    ignore_playlist = should_ignore_playlist_for_url(url)
+    is_explicit_playlist = "/playlist" in urllib.parse.urlparse(url).path.lower() and not ignore_playlist
+
     ydl_opts: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
-        "noplaylist": False,
-        "extract_flat": False,
+        "noplaylist": ignore_playlist,
+        "extract_flat": "in_playlist" if is_explicit_playlist else False,
     }
+    if is_explicit_playlist:
+        ydl_opts["playlistend"] = 30
     if FFMPEG_PATH:
         ydl_opts["ffmpeg_location"] = FFMPEG_PATH
     if sys.platform == "win32":
@@ -1420,7 +1685,7 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
     cookies_browser = str(params.get("cookies_browser") or "none")
     custom_headers = params.get("headers") or {}
     custom_title = str(params.get("custom_title") or "").strip()
-    recode_if_needed = bool(params.get("recode_if_needed", False))
+    recode_if_needed = bool(params.get("recode_if_needed", True))
 
     def update_job(**kwargs: Any) -> None:
         with JOBS_LOCK:
@@ -1542,26 +1807,6 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
                 "preferredquality": "320" if audio_format == "mp3" else "0",
             }
         )
-    else:
-        # Wenn ein spezifischer Codec erzwungen werden soll (z. B. H.264 für QuickTime)
-        if recode_if_needed and codec in {"h264", "h265"}:
-            postprocessors.append(
-                {
-                    "key": "FFmpegVideoConvertor",
-                    "preferedformat": container,
-                }
-            )
-            vcodec_ff = "libx264" if codec == "h264" else "libx265"
-            postprocessor_args["videoconvertor"] = [
-                "-c:v",
-                vcodec_ff,
-                "-preset",
-                "fast",
-                "-crf",
-                "20",
-                "-c:a",
-                "aac",
-            ]
 
     if sponsorblock and sponsorblock_cats:
         postprocessors.append(
@@ -1583,6 +1828,7 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
         "format": format_selector,
         "outtmpl": outtmpl,
         "overwrites": True,
+        "noplaylist": should_ignore_playlist_for_url(url),
         "progress_hooks": [progress_hook],
         "postprocessor_hooks": [postprocessor_hook],
         "postprocessors": postprocessors,
@@ -1668,6 +1914,31 @@ def run_download_job(job_id: str, params: dict[str, Any]) -> None:
                         final_path = cand
             if (not final_path or not os.path.exists(final_path)) and skipped_reasons:
                 raise ValueError(skipped_reasons[0])
+
+            if quality != "audio" and final_path and os.path.exists(final_path):
+                def _on_compat_progress(pct_val: float, label_text: str) -> None:
+                    update_job(
+                        status="processing",
+                        status_text=label_text,
+                        progress=pct_val,
+                        speed_formatted="ffmpeg",
+                        eta_formatted="…",
+                    )
+
+                def _check_cancelled() -> bool:
+                    with JOBS_LOCK:
+                        jb = JOBS.get(job_id)
+                        return bool(jb and jb.get("cancel_requested"))
+
+                final_path = ensure_playable_video_container(
+                    final_path,
+                    codec=codec,
+                    container=container,
+                    recode_if_needed=recode_if_needed,
+                    on_progress=_on_compat_progress,
+                    is_cancelled=_check_cancelled,
+                )
+
             update_job(
                 status="completed",
                 status_text="Abgeschlossen",
@@ -2523,6 +2794,7 @@ class ViDowRequestHandler(BaseHTTPRequestHandler):
                     "codec": payload.get("codec") or "auto",
                     "container": payload.get("container") or "mp4",
                     "audio_format": payload.get("audio_format") or "mp3",
+                    "recode_if_needed": bool(payload.get("recode_if_needed", True)),
                     "skip_preroll_ads": payload.get("skip_preroll_ads", True),
                     "min_duration": int(payload.get("min_duration") or 0),
                     "sponsorblock": bool(payload.get("sponsorblock", False)),

@@ -36,8 +36,8 @@ python3 build_mac_app.py
 ```
 Erzeugt:
 - `dist/ViDow.app` (signiertes Standalone-App-Bundle, auch nach `./ViDow.app` synchronisiert)
-- `dist/ViDow-2.0.3-macOS.dmg` (versandfertiges Disk-Image mit `/Applications`-Verknüpfung)
-- `dist/ViDow-2.0.3-macOS.zip` (fertiges Download-Paket mit `ViDow.app`, Kurzanleitung & Browser-Helper)
+- `dist/ViDow-2.0.4-macOS.dmg` (versandfertiges Disk-Image mit `/Applications`-Verknüpfung)
+- `dist/ViDow-2.0.4-macOS.zip` (fertiges Download-Paket mit `ViDow.app`, Kurzanleitung & Browser-Helper)
 
 ### 🪟 Windows: Nativen `Setup.exe`-Installer & Download-`.zip` erzeugen
 ```powershell
@@ -46,11 +46,11 @@ python -m pip install -r requirements.txt pyinstaller
 python build_windows_exe.py
 ```
 Erzeugt:
-- `dist/ViDow-2.0.3-Windows-Setup.exe` (nativer Windows-10/11-Installer mit Startmenü-/Desktop-Eintrag, Deinstallationsroutine & integriertem `ffmpeg` – funktioniert ohne Admin-Zwang)
-- `dist/ViDow-2.0.3-Windows-Setup.zip` (fertiges Download-Paket mit `Setup.exe`, Kurzanleitung & Browser-Helper)
+- `dist/ViDow-2.0.4-Windows-Setup.exe` (nativer Windows-10/11-Installer mit Startmenü-/Desktop-Eintrag, Deinstallationsroutine & integriertem `ffmpeg` – funktioniert ohne Admin-Zwang)
+- `dist/ViDow-2.0.4-Windows-Setup.zip` (fertiges Download-Paket mit `Setup.exe`, Kurzanleitung & Browser-Helper)
 
 ### ☁️ Automatische GitHub-Releases (CI/CD)
-Über [`.github/workflows/release.yml`](.github/workflows/release.yml) baut GitHub Actions automatisch sowohl die **macOS-Pakete (`.dmg` & `.zip`)** als auch die **Windows-Pakete (`Setup.exe` & `.zip`)** – entweder manuell per *Workflow Dispatch* oder automatisch beim Pushen eines Versions-Tags (z. B. `git tag v2.0.3 && git push origin v2.0.3`).
+Über [`.github/workflows/release.yml`](.github/workflows/release.yml) baut GitHub Actions automatisch sowohl die **macOS-Pakete (`.dmg` & `.zip`)** als auch die **Windows-Pakete (`Setup.exe` & `.zip`)** – entweder manuell per *Workflow Dispatch* oder automatisch beim Pushen eines Versions-Tags (z. B. `git tag v2.0.4 && git push origin v2.0.4`).
 
 ---
 

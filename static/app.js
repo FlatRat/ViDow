@@ -418,6 +418,9 @@ async function initStatus() {
     if (s.codec) els.codecSelect.value = s.codec;
     if (s.container) els.containerSelect.value = s.container;
     if (s.audio_format) els.audioFormatSelect.value = s.audio_format;
+    if (typeof s.recode_if_needed === "boolean") {
+      els.recodeCheckbox.checked = s.recode_if_needed;
+    }
     if (typeof s.skip_preroll_ads === "boolean") {
       els.skipPrerollCheckbox.checked = s.skip_preroll_ads;
     }
